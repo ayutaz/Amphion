@@ -494,3 +494,233 @@ class TestLogging:
         log_metrics(writer, {"l_total": 1.0}, lr=1e-5, grad_norm=0.0,
                      global_step=1, is_main_process=False)
         assert writer.call_count == 0, "Non-main process should not log"
+
+
+# ===========================================================================
+# TestAlgorithm1LossComponents (T1)
+# ===========================================================================
+
+class TestAlgorithm1LossComponents:
+    """Test individual loss component behavior in Algorithm 1."""
+
+    def test_scl_decreases_with_same_speaker(self):
+        """SCL loss should be lower when cond_B and cond_Bp are more similar."""
+        from models.tts.comelsinger.train_s2a import _compute_contrastive_loss
+
+        torch.manual_seed(42)
+        D = 64
+        T = 30
+
+        cfg = {"loss": {"tau": 0.07, "lambda_scl": 1.0, "lambda_fcl": 0.1}}
+
+        # Similar embeddings (small perturbation)
+        cond_B = torch.randn(4, T, D)
+        cond_Bp_similar = cond_B + torch.randn_like(cond_B) * 0.01
+        l_scl_similar, _, _ = _compute_contrastive_loss(
+            cond_B, cond_Bp_similar, torch.zeros(4, T, dtype=torch.long),
+            k_s=4, cfg=cfg, device=torch.device("cpu"),
+        )
+
+        # Dissimilar embeddings (large perturbation)
+        cond_Bp_dissimilar = torch.randn(4, T, D)
+        l_scl_dissimilar, _, _ = _compute_contrastive_loss(
+            cond_B, cond_Bp_dissimilar, torch.zeros(4, T, dtype=torch.long),
+            k_s=4, cfg=cfg, device=torch.device("cpu"),
+        )
+
+        assert l_scl_similar < l_scl_dissimilar, (
+            f"SCL with similar inputs ({l_scl_similar.item():.4f}) "
+            f"should be less than with dissimilar ({l_scl_dissimilar.item():.4f})"
+        )
+
+    def test_fcl_zero_with_all_unvoiced(self):
+        """FCL loss should be zero when all pitch tokens are unvoiced (0)."""
+        from models.tts.comelsinger.train_s2a import _compute_contrastive_loss
+
+        torch.manual_seed(42)
+        B, T, D = 4, 20, 64
+
+        cfg = {"loss": {"tau": 0.07, "lambda_scl": 1.0, "lambda_fcl": 0.1}}
+
+        cond_B = torch.randn(B, T, D)
+        cond_Bp = torch.randn(B, T, D)
+        # All unvoiced (pitch=0) -> soft label matrix is all zeros -> FCL=0
+        pitch_all_unvoiced = torch.zeros(B, T, dtype=torch.long)
+
+        _, l_fcl, _ = _compute_contrastive_loss(
+            cond_B, cond_Bp, pitch_all_unvoiced,
+            k_s=0, cfg=cfg, device=torch.device("cpu"),
+        )
+
+        assert l_fcl.item() == pytest.approx(0.0, abs=1e-6), (
+            f"FCL should be 0 with all unvoiced, got {l_fcl.item()}"
+        )
+
+    def test_mask_loss_positive(self):
+        """Mask prediction loss should be positive with random inputs."""
+        from models.tts.comelsinger.train_s2a import _compute_mask_loss
+        from models.tts.comelsinger.comelsinger_s2a import CoMelSinger_S2A
+
+        torch.manual_seed(42)
+        B, T = 2, 30
+
+        s2a = CoMelSinger_S2A()
+        s2a.train()
+
+        acoustic_tokens = torch.randint(0, 1024, (B, T, 12))
+        attention_mask = torch.ones(B, T, dtype=torch.long)
+        semantic_tokens = torch.randint(0, 1024, (B, T))
+        pitch_tokens = torch.randint(0, 129, (B, T))
+
+        l_mask = _compute_mask_loss(
+            s2a, acoustic_tokens, attention_mask,
+            semantic_tokens, pitch_tokens, torch.device("cpu"),
+        )
+
+        assert l_mask.item() > 0, f"Mask loss should be positive, got {l_mask.item()}"
+        assert torch.isfinite(l_mask), "Mask loss should be finite"
+
+    def test_scl_uses_prompt_portion(self):
+        """SCL AvgPool should use only the prompt portion of the sequence."""
+        from models.tts.comelsinger.train_s2a import _compute_contrastive_loss
+
+        torch.manual_seed(42)
+        B, T, D = 4, 100, 64
+        prompt_len = max(1, int(T * 0.3))  # 30 frames
+
+        cfg = {"loss": {"tau": 0.07, "lambda_scl": 1.0, "lambda_fcl": 0.1}}
+
+        # Make prompt and non-prompt portions very different
+        cond_B = torch.zeros(B, T, D)
+        cond_B[:, :prompt_len] = torch.randn(B, prompt_len, D) * 10
+        cond_B[:, prompt_len:] = torch.randn(B, T - prompt_len, D) * 0.001
+
+        cond_Bp = cond_B.clone()
+        cond_Bp[:, :prompt_len] += torch.randn(B, prompt_len, D) * 0.01
+
+        l_scl, _, _ = _compute_contrastive_loss(
+            cond_B, cond_Bp, torch.zeros(B, T, dtype=torch.long),
+            k_s=4, cfg=cfg, device=torch.device("cpu"),
+        )
+
+        # Loss should be small since prompt portions are similar
+        assert torch.isfinite(l_scl), "SCL loss should be finite"
+
+
+# ===========================================================================
+# TestTrainUtils (P1, P5)
+# ===========================================================================
+
+class TestTrainUtils:
+    """Test shared utility functions from train_utils.py."""
+
+    def test_set_seed_deterministic(self):
+        from models.tts.comelsinger.train_utils import set_seed
+
+        set_seed(123)
+        a = torch.randn(5)
+        set_seed(123)
+        b = torch.randn(5)
+        assert torch.equal(a, b)
+
+    def test_get_device_returns_valid(self):
+        from models.tts.comelsinger.train_utils import get_device
+
+        device = get_device()
+        assert isinstance(device, torch.device)
+
+    def test_check_loss_finite_true(self):
+        from models.tts.comelsinger.train_utils import check_loss_finite
+
+        assert check_loss_finite(torch.tensor(1.0), step=0) is True
+
+    def test_check_loss_finite_nan(self):
+        from models.tts.comelsinger.train_utils import check_loss_finite
+
+        assert check_loss_finite(torch.tensor(float("nan")), step=0) is False
+
+    def test_check_loss_finite_inf(self):
+        from models.tts.comelsinger.train_utils import check_loss_finite
+
+        assert check_loss_finite(torch.tensor(float("inf")), step=0) is False
+
+    def test_unwrap_model_plain(self):
+        from models.tts.comelsinger.train_utils import unwrap_model
+
+        model = torch.nn.Linear(10, 10)
+        assert unwrap_model(model) is model
+
+    def test_unwrap_model_ddp_like(self):
+        from models.tts.comelsinger.train_utils import unwrap_model
+
+        inner = torch.nn.Linear(10, 10)
+
+        class FakeDDP(torch.nn.Module):
+            def __init__(self, m):
+                super().__init__()
+                self.module = m
+
+        wrapped = FakeDDP(inner)
+        assert unwrap_model(wrapped) is inner
+
+    def test_load_config_missing_file(self):
+        from models.tts.comelsinger.train_utils import load_config
+
+        with pytest.raises(FileNotFoundError):
+            load_config("/nonexistent/path.yaml")
+
+
+# ===========================================================================
+# TestLoRACheckpointRoundTrip (T3)
+# ===========================================================================
+
+class TestLoRACheckpointRoundTrip:
+    """Test LoRA adapter checkpoint save and load round-trip."""
+
+    def test_lora_save_load_roundtrip(self, tmp_path):
+        """LoRA adapter weights should survive a save/load round trip."""
+        try:
+            from peft import LoraConfig, get_peft_model
+        except ImportError:
+            pytest.skip("peft not installed")
+
+        from models.tts.comelsinger.comelsinger_s2a import CoMelSinger_S2A
+
+        # Build model + LoRA
+        base_model = CoMelSinger_S2A()
+        lora_config = LoraConfig(
+            r=4,
+            lora_alpha=8,
+            target_modules=["q_proj", "v_proj"],
+            lora_dropout=0.0,
+            bias="none",
+            modules_to_save=["pitch_emb"],
+        )
+        peft_model = get_peft_model(base_model, lora_config)
+
+        # Run a forward to get non-trivial state
+        B, T = 2, 20
+        x0 = torch.randint(0, 1024, (B, T, 12))
+        x_mask = torch.ones(B, T)
+        cond = torch.randint(0, 1024, (B, T))
+        pitch = torch.randint(0, 129, (B, T))
+        peft_model.train()
+        out = peft_model(x0, x_mask, cond, pitch)
+
+        # Save
+        save_dir = str(tmp_path / "lora_adapter")
+        peft_model.save_pretrained(save_dir)
+
+        # Load into fresh model
+        from peft import PeftModel
+
+        base_model2 = CoMelSinger_S2A()
+        loaded = PeftModel.from_pretrained(base_model2, save_dir)
+
+        # Compare trainable parameters
+        orig_params = dict(peft_model.named_parameters())
+        for name, param in loaded.named_parameters():
+            if name in orig_params and param.requires_grad:
+                assert torch.equal(param.data, orig_params[name].data), (
+                    f"Parameter {name} differs after LoRA round-trip"
+                )

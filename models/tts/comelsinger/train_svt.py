@@ -31,6 +31,12 @@ from models.tts.comelsinger.dataset import (
 )
 from models.tts.comelsinger.losses import compute_svt_loss
 from models.tts.comelsinger.svt_module import SVTModule
+from models.tts.comelsinger.train_utils import (
+    check_loss_finite,
+    get_device as _get_device,
+    load_config as _load_config,
+    set_seed as _set_seed,
+)
 
 # TensorBoard is optional
 try:
@@ -79,47 +85,25 @@ def parse_args() -> argparse.Namespace:
 def load_config(config_path: str) -> dict:
     """Load YAML configuration file.
 
-    Args:
-        config_path: Path to .yaml config file.
-
-    Returns:
-        Nested dict with all configuration values.
-
-    Raises:
-        FileNotFoundError: If config file does not exist.
-        ValueError: If required top-level keys are missing.
+    Delegates to ``train_utils.load_config`` (shared implementation).
     """
-    path = Path(config_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-
-    with open(path) as f:
-        config = yaml.safe_load(f)
-
-    required_keys = {"model", "training", "optimizer", "loss", "data", "checkpoint"}
-    missing = required_keys - set(config.keys())
-    if missing:
-        raise ValueError(f"Config missing required keys: {missing}")
-
-    return config
+    return _load_config(config_path)
 
 
 def set_seed(seed: int) -> None:
-    """Set random seed for reproducibility across all frameworks."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    """Set random seed for reproducibility across all frameworks.
+
+    Delegates to ``train_utils.set_seed`` (shared implementation).
+    """
+    _set_seed(seed)
 
 
 def get_device() -> torch.device:
-    """Get the best available device (CUDA > MPS > CPU)."""
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
+    """Get the best available device (CUDA > MPS > CPU).
+
+    Delegates to ``train_utils.get_device`` (shared implementation).
+    """
+    return _get_device()
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +481,18 @@ def train_step(
     # Backward
     optimizer.zero_grad()
     total_loss.backward()
+
+    # P4: NaN/Inf detection — skip step if loss is non-finite
+    if not check_loss_finite(total_loss, step=-1):
+        optimizer.zero_grad()
+        current_lr = optimizer.param_groups[0]["lr"]
+        return {
+            "loss_total": float("nan"),
+            "l_ce": float("nan"),
+            "l_seg": float("nan"),
+            "l_dur": float("nan"),
+            "lr": current_lr,
+        }
 
     # Gradient clipping
     grad_clip = config["training"].get("gradient_clip", 1.0)

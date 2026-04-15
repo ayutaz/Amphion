@@ -25,6 +25,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import yaml
 
+from models.tts.comelsinger.train_utils import (
+    check_loss_finite,
+    unwrap_model,
+)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -317,106 +322,47 @@ def crosscheck_config(cfg: dict) -> None:
     logger.info("Config cross-check PASSED: all lambda values match.")
 
 
-# ===== M3-12/13/14/15/16/17/18: Algorithm 1 training step ==================
+# ===== P2: Algorithm 1 helper functions ====================================
 
-def algorithm1_step(
-    s2a_model: nn.Module,
-    svt_model: nn.Module,
-    batch: Dict[str, Any],
+
+def _compute_contrastive_loss(
+    cond_B: torch.Tensor,
+    cond_Bp: torch.Tensor,
+    pitch_tokens: torch.Tensor,
+    k_s: int,
     cfg: dict,
     device: torch.device,
-) -> Dict[str, torch.Tensor]:
-    """Execute one training step of Algorithm 1.
-
-    This function implements the full Algorithm 1 from paper Section IV-B:
-    1. Split batch into SCL (k_s) and FCL (K-k_s) subsets
-    2. Apply pitch perturbation
-    3. Compute S2A forward with original and perturbed pitch (cond_B, cond_Bp)
-    4. Compute SCL loss (sequence-level contrastive)
-    5. Compute FCL loss (frame-level contrastive)
-    6. Compute L_CL = lambda_scl * L_SCL + lambda_fcl * L_FCL
-    7. Compute L_mask via S2A compute_loss
-    8. Compute L_SVT via frozen SVT
-    9. Compute L_total = lambda_cl * L_CL + lambda_svt * L_SVT + lambda_mask * L_mask
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute contrastive losses (SCL + FCL).
 
     Args:
-        s2a_model: CoMelSinger_S2A (possibly wrapped in PeftModel / DDP).
-        svt_model: frozen SVTModule.
-        batch: collated batch dict from DataLoader.
-        cfg: full config dict.
+        cond_B: (B, T, D) condition embeddings with original pitch.
+        cond_Bp: (B, T, D) condition embeddings with perturbed pitch.
+        pitch_tokens: (B, T) pitch token tensor.
+        k_s: number of samples for SCL subset.
+        cfg: config dict (uses loss.tau, loss.lambda_scl, loss.lambda_fcl).
         device: computation device.
 
     Returns:
-        dict with keys: l_total, l_scl, l_fcl, l_cl, l_svt, l_mask, l_ce, l_seg, l_dur
+        (l_scl, l_fcl, l_cl) scalar loss tensors.
     """
-    from models.tts.comelsinger.losses import (
-        compute_fcl_loss,
-        compute_scl_loss,
-        compute_svt_loss,
-        compute_total_loss,
-    )
+    from models.tts.comelsinger.losses import compute_fcl_loss, compute_scl_loss
 
     loss_cfg = cfg.get("loss", {})
-    training_cfg = cfg.get("training", {})
-    k_s = training_cfg.get("k_s", 8)
     tau = loss_cfg.get("tau", 0.07)
-    lambda_cl = loss_cfg.get("lambda_cl", 0.5)
     lambda_scl = loss_cfg.get("lambda_scl", 1.0)
     lambda_fcl = loss_cfg.get("lambda_fcl", 0.1)
-    lambda_svt = loss_cfg.get("lambda_svt", 0.5)
-    lambda_mask = loss_cfg.get("lambda_mask", 0.3)
-    lambda_seg = loss_cfg.get("lambda_seg", 3.0)
-    lambda_dur = loss_cfg.get("lambda_dur", 5.0)
-    delta = loss_cfg.get("delta", 0.5)
 
-    # -- Move batch tensors to device --
-    def to_dev(v):
-        return v.to(device) if isinstance(v, torch.Tensor) else v
-
-    batch = {k: to_dev(v) for k, v in batch.items()}
-
-    # Access the underlying model through potential PeftModel / DDP wrappers
-    base_model = s2a_model
-    if hasattr(base_model, "module"):
-        base_model = base_model.module
-    # PeftModel wraps the actual CoMelSinger_S2A as .model or .base_model
-    if hasattr(base_model, "get_base_model"):
-        _inner = base_model.get_base_model()
-    else:
-        _inner = base_model
-
-    # Prepare tensors: acoustic_tokens from collate is (B, 12, T) -> need (B, T, 12)
-    acoustic_tokens = batch["acoustic_tokens"]
-    if acoustic_tokens.dim() == 3 and acoustic_tokens.shape[1] == 12:
-        acoustic_tokens = acoustic_tokens.permute(0, 2, 1)  # (B, T, 12)
-    semantic_tokens = batch["semantic_tokens"]  # (B, T)
-    pitch_tokens = batch["pitch_tokens"]  # (B, T)
-    attention_mask = batch["attention_mask"]  # (B, T)
-
-    B, T = semantic_tokens.shape
-
-    # ===== M3-10: Pitch perturbation ========================================
-    perturbed_pitch = pitch_perturbation(
-        pitch_tokens,
-        zero_prob=0.5,
-        max_shift=6,
-        pitch_vocab_size=129,
-    )
-
-    # ===== M3-12: S2A forward (cond_B and cond_Bp) ==========================
-    # get_cond builds: cond_emb(semantic) + pitch_emb(pitch)
-    cond_B = _inner.get_cond(semantic_tokens, pitch_tokens)  # (B, T, D)
-    cond_Bp = _inner.get_cond(semantic_tokens, perturbed_pitch)  # (B, T, D)
-
-    # ===== M3-09: Batch split ===============================================
-    # Ensure k_s does not exceed batch size
+    B, T, _D = cond_B.shape
     actual_k_s = min(k_s, B)
 
     # ===== M3-13: SCL loss ==================================================
-    # Global average pool -> (K_s, D)
+    # N2 fix: AvgPool over prompt portion only (spec line 634).
+    # Use 30% of sequence length as default prompt length.
     if actual_k_s >= 2:
-        g_a = cond_B[:actual_k_s].mean(dim=1)   # (K_s, D)
-        g_b = cond_Bp[:actual_k_s].mean(dim=1)  # (K_s, D)
+        prompt_len = max(1, int(T * 0.3))
+        g_a = cond_B[:actual_k_s, :prompt_len].mean(dim=1)   # (K_s, D)
+        g_b = cond_Bp[:actual_k_s, :prompt_len].mean(dim=1)  # (K_s, D)
         l_scl = compute_scl_loss(g_a, g_b, tau=tau)
     else:
         l_scl = torch.tensor(0.0, device=device, requires_grad=True)
@@ -434,9 +380,30 @@ def algorithm1_step(
     # ===== M3-15: L_CL =====================================================
     l_cl = lambda_scl * l_scl + lambda_fcl * l_fcl
 
-    # ===== M3-16: L_mask (MaskGCT mask prediction loss) =====================
-    # CoMelSinger_S2A.forward -> compute_loss -> loss_t
-    # Returns: logits, mask_layer, final_mask, x0, prompt_len, mask_prob
+    return l_scl, l_fcl, l_cl
+
+
+def _compute_mask_loss(
+    s2a_model: nn.Module,
+    acoustic_tokens: torch.Tensor,
+    attention_mask: torch.Tensor,
+    semantic_tokens: torch.Tensor,
+    pitch_tokens: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor:
+    """Compute MaskGCT mask prediction loss.
+
+    Args:
+        s2a_model: CoMelSinger_S2A (possibly wrapped).
+        acoustic_tokens: (B, T, 12) acoustic tokens.
+        attention_mask: (B, T) padding mask.
+        semantic_tokens: (B, T) semantic tokens.
+        pitch_tokens: (B, T) pitch tokens.
+        device: computation device.
+
+    Returns:
+        l_mask: scalar mask prediction loss.
+    """
     logits, mask_layer, final_mask, x0_out, prompt_len, mask_prob = s2a_model(
         acoustic_tokens, attention_mask.float(), semantic_tokens, pitch_tokens
     )
@@ -451,8 +418,49 @@ def algorithm1_step(
         )
     else:
         l_mask = torch.tensor(0.0, device=device, requires_grad=True)
+    return l_mask
 
-    # ===== M3-17: L_SVT (frozen SVT pitch supervision) ======================
+
+def _compute_svt_loss_step(
+    svt_model: nn.Module,
+    acoustic_tokens: torch.Tensor,
+    pitch_tokens: torch.Tensor,
+    attention_mask: torch.Tensor,
+    batch: Dict[str, Any],
+    cfg: dict,
+    B: int,
+) -> tuple[torch.Tensor, dict]:
+    """Compute SVT pitch supervision loss (monitoring only).
+
+    NOTE (N1): L_SVT is a monitoring-only loss. The SVT module is frozen
+    (StopGrad, Section III-C) and its input is GT acoustic tokens (discrete
+    values, not generated by S2A). Therefore no gradient flows from L_SVT
+    to S2A parameters. Paper Algorithm 1 lines 19-21 confirm: SVT is applied
+    to GT tokens with StopGrad. L_SVT is included in the total loss formula
+    (Algorithm 1 line 23) for monitoring purposes but does not contribute to
+    S2A parameter updates because it is detached. This is the correct
+    interpretation per paper Section III-C.
+
+    Args:
+        svt_model: frozen SVTModule.
+        acoustic_tokens: (B, T, 12) acoustic tokens.
+        pitch_tokens: (B, T) pitch tokens.
+        attention_mask: (B, T) padding mask.
+        batch: collated batch dict (for note_durations, note_pitches).
+        cfg: config dict (uses loss.lambda_seg, loss.lambda_dur, loss.delta).
+        B: batch size.
+
+    Returns:
+        (l_svt, svt_detail) where l_svt is detached and svt_detail
+        contains sub-losses {l_ce, l_seg, l_dur}.
+    """
+    from models.tts.comelsinger.losses import compute_svt_loss
+
+    loss_cfg = cfg.get("loss", {})
+    lambda_seg = loss_cfg.get("lambda_seg", 3.0)
+    lambda_dur = loss_cfg.get("lambda_dur", 5.0)
+    delta = loss_cfg.get("delta", 0.5)
+
     with torch.no_grad():
         svt_out = svt_model(acoustic_tokens)  # {"logits": (B, T, 129)}
 
@@ -468,8 +476,14 @@ def algorithm1_step(
     )
 
     if has_note_info:
-        frame_alignment = [nd.tolist() if isinstance(nd, torch.Tensor) else nd for nd in note_durations]
-        pitch_note_labels = [np_item.tolist() if isinstance(np_item, torch.Tensor) else np_item for np_item in note_pitches]
+        frame_alignment = [
+            nd.tolist() if isinstance(nd, torch.Tensor) else nd
+            for nd in note_durations
+        ]
+        pitch_note_labels = [
+            np_item.tolist() if isinstance(np_item, torch.Tensor) else np_item
+            for np_item in note_pitches
+        ]
 
         l_svt_total, svt_detail = compute_svt_loss(
             pitch_logits=svt_out["logits"].detach(),
@@ -492,12 +506,106 @@ def algorithm1_step(
             targets_svt.reshape(-1),
             ignore_index=-100,
         )
-        svt_detail = {"l_ce": l_svt_total, "l_seg": torch.tensor(0.0), "l_dur": torch.tensor(0.0)}
+        svt_detail = {
+            "l_ce": l_svt_total,
+            "l_seg": torch.tensor(0.0),
+            "l_dur": torch.tensor(0.0),
+        }
 
-    # SVT loss is detached (no grad through SVT), but we keep it as a
-    # differentiable scalar so it can be part of the total loss graph
-    # (even though its gradient contribution is zero for SVT params).
+    # N1: L_SVT is detached because SVT input is GT acoustic tokens (discrete),
+    # not S2A-generated. No gradient path exists from L_SVT to S2A parameters.
+    # See paper Algorithm 1 lines 19-21 and Section III-C for justification.
     l_svt = l_svt_total.detach()
+
+    return l_svt, svt_detail
+
+
+# ===== M3-12/13/14/15/16/17/18: Algorithm 1 training step ==================
+
+def algorithm1_step(
+    s2a_model: nn.Module,
+    svt_model: nn.Module,
+    batch: Dict[str, Any],
+    cfg: dict,
+    device: torch.device,
+) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """Execute one training step of Algorithm 1.
+
+    This function orchestrates the full Algorithm 1 from paper Section IV-B
+    by delegating to three helper functions:
+    1. ``_compute_contrastive_loss``: SCL + FCL -> L_CL
+    2. ``_compute_mask_loss``: MaskGCT mask prediction -> L_mask
+    3. ``_compute_svt_loss_step``: frozen SVT pitch supervision -> L_SVT
+
+    Then computes:  L_total = lambda_cl * L_CL + lambda_svt * L_SVT + lambda_mask * L_mask
+
+    Args:
+        s2a_model: CoMelSinger_S2A (possibly wrapped in PeftModel / DDP).
+        svt_model: frozen SVTModule.
+        batch: collated batch dict from DataLoader.
+        cfg: full config dict.
+        device: computation device.
+
+    Returns:
+        (l_total, loss_dict) where loss_dict has keys:
+        l_total, l_scl, l_fcl, l_cl, l_svt, l_mask, l_ce, l_seg, l_dur
+    """
+    from models.tts.comelsinger.losses import compute_total_loss
+
+    loss_cfg = cfg.get("loss", {})
+    training_cfg = cfg.get("training", {})
+    k_s = training_cfg.get("k_s", 8)
+    lambda_cl = loss_cfg.get("lambda_cl", 0.5)
+    lambda_scl = loss_cfg.get("lambda_scl", 1.0)
+    lambda_fcl = loss_cfg.get("lambda_fcl", 0.1)
+    lambda_svt = loss_cfg.get("lambda_svt", 0.5)
+    lambda_mask = loss_cfg.get("lambda_mask", 0.3)
+
+    # -- Move batch tensors to device --
+    def to_dev(v):
+        return v.to(device) if isinstance(v, torch.Tensor) else v
+
+    batch = {k: to_dev(v) for k, v in batch.items()}
+
+    # P5: Safely unwrap DDP/PeftModel wrappers
+    _inner = unwrap_model(s2a_model)
+
+    # Prepare tensors: acoustic_tokens from collate is (B, 12, T) -> need (B, T, 12)
+    acoustic_tokens = batch["acoustic_tokens"]
+    if acoustic_tokens.dim() == 3 and acoustic_tokens.shape[1] == 12:
+        acoustic_tokens = acoustic_tokens.permute(0, 2, 1)  # (B, T, 12)
+    semantic_tokens = batch["semantic_tokens"]  # (B, T)
+    pitch_tokens = batch["pitch_tokens"]  # (B, T)
+    attention_mask = batch["attention_mask"]  # (B, T)
+
+    B, T = semantic_tokens.shape
+
+    # ===== M3-10: Pitch perturbation ========================================
+    perturbed_pitch = pitch_perturbation(
+        pitch_tokens,
+        zero_prob=0.5,
+        max_shift=6,
+        pitch_vocab_size=129,
+    )
+
+    # ===== M3-12: S2A forward (cond_B and cond_Bp) ==========================
+    cond_B = _inner.get_cond(semantic_tokens, pitch_tokens)  # (B, T, D)
+    cond_Bp = _inner.get_cond(semantic_tokens, perturbed_pitch)  # (B, T, D)
+
+    # ===== P2: Delegate to helpers ==========================================
+    l_scl, l_fcl, l_cl = _compute_contrastive_loss(
+        cond_B, cond_Bp, pitch_tokens, k_s, cfg, device,
+    )
+
+    l_mask = _compute_mask_loss(
+        s2a_model, acoustic_tokens, attention_mask,
+        semantic_tokens, pitch_tokens, device,
+    )
+
+    l_svt, svt_detail = _compute_svt_loss_step(
+        svt_model, acoustic_tokens, pitch_tokens,
+        attention_mask, batch, cfg, B,
+    )
 
     # ===== M3-18: Total loss ================================================
     l_total, loss_dict = compute_total_loss(
@@ -513,9 +621,21 @@ def algorithm1_step(
     )
 
     # Merge SVT sub-losses into output dict
-    loss_dict["l_ce"] = svt_detail["l_ce"].detach() if isinstance(svt_detail["l_ce"], torch.Tensor) else svt_detail["l_ce"]
-    loss_dict["l_seg"] = svt_detail["l_seg"].detach() if isinstance(svt_detail["l_seg"], torch.Tensor) else svt_detail["l_seg"]
-    loss_dict["l_dur"] = svt_detail["l_dur"].detach() if isinstance(svt_detail["l_dur"], torch.Tensor) else svt_detail["l_dur"]
+    loss_dict["l_ce"] = (
+        svt_detail["l_ce"].detach()
+        if isinstance(svt_detail["l_ce"], torch.Tensor)
+        else svt_detail["l_ce"]
+    )
+    loss_dict["l_seg"] = (
+        svt_detail["l_seg"].detach()
+        if isinstance(svt_detail["l_seg"], torch.Tensor)
+        else svt_detail["l_seg"]
+    )
+    loss_dict["l_dur"] = (
+        svt_detail["l_dur"].detach()
+        if isinstance(svt_detail["l_dur"], torch.Tensor)
+        else svt_detail["l_dur"]
+    )
 
     return l_total, loss_dict
 
@@ -588,8 +708,8 @@ def save_checkpoint(
     epoch_dir = os.path.join(output_dir, f"epoch_{epoch:04d}")
     os.makedirs(epoch_dir, exist_ok=True)
 
-    # Save LoRA adapter if model is a PeftModel
-    unwrapped = model.module if hasattr(model, "module") else model
+    # P5: Safely unwrap DDP/PeftModel wrappers
+    unwrapped = unwrap_model(model)
     if hasattr(unwrapped, "save_pretrained"):
         unwrapped.save_pretrained(epoch_dir)
         logger.info("Saved LoRA adapter to %s", epoch_dir)
@@ -784,6 +904,12 @@ def train(cfg: dict, dry_run: bool = False) -> None:
             l_total, loss_dict = algorithm1_step(
                 s2a_model, svt_model, batch, cfg, device,
             )
+
+            # P4: NaN/Inf detection — skip step if loss is non-finite
+            if not check_loss_finite(l_total, step=global_step):
+                optimizer.zero_grad()
+                global_step += 1
+                continue
 
             # ---- Backward + update ----
             optimizer.zero_grad()
