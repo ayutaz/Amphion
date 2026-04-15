@@ -1,0 +1,42 @@
+# SVT Training Configuration (Paper Section IV-B confirmed values)
+model:
+  num_codebooks: 12
+  codebook_size: 1024
+  codebook_embed_dim: 64
+  hidden_size: 512
+  num_layers: 4
+  num_heads: 8
+  pitch_vocab_size: 129
+  dropout: 0.1
+
+training:
+  seed: 42
+  max_steps: 50000
+  batch_size: 32
+  gradient_clip: 1.0
+  precision: fp32
+  log_interval: 100
+  save_interval: 1000
+  val_interval: 1000
+
+optimizer:
+  type: AdamW
+  lr: 1.0e-5
+  weight_decay: 0.01
+
+scheduler:
+  type: cosine
+  T_max: 50000
+  eta_min: 0
+
+loss:
+  lambda_seg: 3.0
+  lambda_dur: 5.0
+  delta: 0.5
+
+data:
+  data_dir: data/preprocessed
+  num_workers: 4
+
+checkpoint:
+  output_dir: checkpoints/svt

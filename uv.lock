@@ -105,6 +105,7 @@ dependencies = [
     { name = "numpy" },
     { name = "peft" },
     { name = "pypinyin" },
+    { name = "pyyaml" },
     { name = "torch" },
     { name = "transformers" },
 ]
@@ -121,6 +122,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.4.4" },
     { name = "peft", specifier = ">=0.11.0" },
     { name = "pypinyin", specifier = ">=0.55.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "torch", specifier = ">=2.11.0" },
     { name = "transformers", specifier = ">=4.40.0,<5.0.0" },
 ]
