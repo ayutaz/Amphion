@@ -64,7 +64,8 @@ L_CL  = λ_SCL · L_SCL + λ_FCL · L_FCL   (対照学習)
 L_SVT = L_CE + λ_seg · L_seg + λ_dur · L_dur  (SVTからのピッチ監督、frozen)
 L_mask = MaskLoss(â, a)                    (MaskGCTのマスク予測損失)
 
-重み: λ_SCL=0.5, λ_FCL=1.0, λ_SVT=0.1, λ_mask=0.3, λ_seg=3, λ_dur=5
+重み: λ_CL=0.5, λ_SCL=1.0, λ_FCL=0.1, λ_SVT=0.5, λ_mask=0.3, λ_seg=3, λ_dur=5
+（※ 論文 Section IV-B 確定値。要件定義書12で修正済み）
 ```
 
 ### 事前学習済みモデル（HuggingFace）
@@ -113,6 +114,9 @@ L_mask = MaskLoss(â, a)                    (MaskGCTのマスク予測損失)
 - [x] 論文分析ドキュメント作成（10本、合計5,332行）
 - [x] Amphion fork & sparse-checkout
 - [x] プロジェクト構造セットアップ
+- [x] 要求定義書作成（11_requirements_definition.md, 810行）
+- [x] 要件定義書作成（12_requirements_specification.md, 923行）
+- [x] マイルストーン計画書作成（13_milestones.md, M0〜M4, 81タスク）
 - [ ] ピッチトークナイザー実装
 - [ ] SVTモジュール実装
 - [ ] S2A拡張（ピッチ埋め込み + 対照学習）
