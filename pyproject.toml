@@ -1,0 +1,21 @@
+[project]
+name = "comelsinger"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy>=2.4.4",
+    "pypinyin>=0.55.0",
+    "torch>=2.11.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (require real pretrained models; deselect with -m 'not slow')",
+]
