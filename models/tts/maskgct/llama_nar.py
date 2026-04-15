@@ -57,6 +57,7 @@ class LlamaNARDecoderLayer(LlamaDecoderLayer):
     def __init__(self, config: LlamaConfig, layer_idx: int):
         """Override to adaptive layer norm"""
         super().__init__(config, layer_idx)  # init attention, mlp, etc.
+        self.layer_idx = layer_idx
         self.input_layernorm = LlamaAdaptiveRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps, dim_cond=config.hidden_size
         )
@@ -74,21 +75,21 @@ class LlamaNARDecoderLayer(LlamaDecoderLayer):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> Tuple[
         torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
     ]:
         """
         Args:
             hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
-            attention_mask (`torch.FloatTensor`, *optional*): attention mask of size
-                `(batch, 1, tgt_len, src_len)` where padding elements are indicated by very large negative values.
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
-            use_cache (`bool`, *optional*):
-                If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
-                (see `past_key_values`).
-            past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
+            cond_embedding (`torch.FloatTensor`): conditioning embedding (diffusion step)
+            attention_mask (`torch.FloatTensor`, *optional*): attention mask
+            position_ids (`torch.LongTensor`, *optional*): position ids
+            past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key/value states
+            output_attentions (`bool`, *optional*): whether to return attention weights
+            use_cache (`bool`, *optional*): whether to use kv-cache
+            position_embeddings (`Tuple[torch.Tensor, torch.Tensor]`, *optional*):
+                (cos, sin) rotary position embeddings; required by transformers>=4.45
         """
 
         residual = hidden_states
@@ -97,87 +98,22 @@ class LlamaNARDecoderLayer(LlamaDecoderLayer):
             hidden_states, cond_embedding=cond_embedding
         )
 
-        # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        # Self Attention — pass position_embeddings for transformers>=4.45 compatibility
+        attn_out = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
+            position_embeddings=position_embeddings,
         )
-        hidden_states = residual + hidden_states
+        # transformers>=4.45 returns (attn_output, attn_weights); older versions
+        # returned (attn_output, attn_weights, present_key_value)
+        hidden_states = attn_out[0]
+        self_attn_weights = attn_out[1] if len(attn_out) > 1 else None
+        present_key_value = attn_out[2] if len(attn_out) > 2 else None
 
-        # Fully Connected
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(
-            hidden_states, cond_embedding=cond_embedding
-        )
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-
-        outputs = (hidden_states,)
-
-        if output_attentions:
-            outputs += (self_attn_weights,)
-
-        if use_cache:
-            outputs += (present_key_value,)
-
-        return outputs
-
-    def __init__(self, config: LlamaConfig, layer_idx: int):
-        """Override to adaptive layer norm"""
-        super().__init__(config, layer_idx)  # init attention, mlp, etc.
-        self.layer_idx = layer_idx
-        self.input_layernorm = LlamaAdaptiveRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps, dim_cond=config.hidden_size
-        )
-        self.post_attention_layernorm = LlamaAdaptiveRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps, dim_cond=config.hidden_size
-        )
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        cond_embedding: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
-        output_attentions: Optional[bool] = False,
-        use_cache: Optional[bool] = False,
-    ) -> Tuple[
-        torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
-    ]:
-        """
-        Args:
-            hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
-            attention_mask (`torch.FloatTensor`, *optional*): attention mask of size
-                `(batch, 1, tgt_len, src_len)` where padding elements are indicated by very large negative values.
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
-            use_cache (`bool`, *optional*):
-                If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
-                (see `past_key_values`).
-            past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
-        """
-
-        residual = hidden_states
-
-        hidden_states = self.input_layernorm(
-            hidden_states, cond_embedding=cond_embedding
-        )
-
-        # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
-        )
         hidden_states = residual + hidden_states
 
         # Fully Connected
@@ -207,19 +143,28 @@ class DiffLlama(LlamaModel):
         num_layers=16,
         config=LlamaConfig(0, 256, 1024, 1, 1),
     ):
-        super().__init__(config)
+        # Build a proper config so rotary_emb uses the correct head_dim
+        actual_config = LlamaConfig(
+            hidden_size=hidden_size,
+            num_attention_heads=num_heads,
+            max_position_embeddings=4096,
+            intermediate_size=hidden_size * 4,
+            vocab_size=max(config.vocab_size, 1),
+        )
+        super().__init__(actual_config)
+
+        # Use "eager" for compatibility; this is overwritten per-layer below
+        _layer_config = LlamaConfig(
+            hidden_size=hidden_size,
+            num_attention_heads=num_heads,
+            max_position_embeddings=4096,
+            intermediate_size=hidden_size * 4,
+        )
+        _layer_config._attn_implementation = "eager"
 
         self.layers = nn.ModuleList(
             [
-                LlamaNARDecoderLayer(
-                    LlamaConfig(
-                        hidden_size=hidden_size,
-                        num_attention_heads=num_heads,
-                        max_position_embeddings=4096,
-                        intermediate_size=hidden_size * 4,
-                    ),
-                    layer_idx=i,
-                )
+                LlamaNARDecoderLayer(_layer_config, layer_idx=i)
                 for i in range(num_layers)
             ]
         )
@@ -378,6 +323,9 @@ class DiffLlama(LlamaModel):
             if use_cache:
                 use_cache = False
 
+        # Compute rotary position embeddings once for all layers (transformers>=4.45)
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
@@ -403,6 +351,7 @@ class DiffLlama(LlamaModel):
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cond_embedding=diffusion_step,
+                    position_embeddings=position_embeddings,
                 )
 
             hidden_states = layer_outputs[0]
@@ -433,21 +382,30 @@ class DiffLlamaPrefix(LlamaModel):
         use_phone_cond=True,
         config=LlamaConfig(0, 256, 1024, 1, 1),
     ):
-        super().__init__(config)
+        # Build a proper config so rotary_emb uses the correct head_dim
+        actual_config = LlamaConfig(
+            hidden_size=hidden_size,
+            num_attention_heads=num_heads,
+            max_position_embeddings=4096,
+            intermediate_size=hidden_size * 4,
+            vocab_size=max(config.vocab_size, 1),
+        )
+        super().__init__(actual_config)
 
         self.use_phone_cond = use_phone_cond
 
+        # Use "eager" for compatibility with transformers>=4.45
+        _layer_config = LlamaConfig(
+            hidden_size=hidden_size,
+            num_attention_heads=num_heads,
+            max_position_embeddings=4096,
+            intermediate_size=hidden_size * 4,
+        )
+        _layer_config._attn_implementation = "eager"
+
         self.layers = nn.ModuleList(
             [
-                LlamaNARDecoderLayer(
-                    LlamaConfig(
-                        hidden_size=hidden_size,
-                        num_attention_heads=num_heads,
-                        max_position_embeddings=4096,
-                        intermediate_size=hidden_size * 4,
-                    ),
-                    layer_idx=i,
-                )
+                LlamaNARDecoderLayer(_layer_config, layer_idx=i)
                 for i in range(num_layers)
             ]
         )
@@ -610,6 +568,9 @@ class DiffLlamaPrefix(LlamaModel):
             if use_cache:
                 use_cache = False
 
+        # Compute rotary position embeddings once for all layers (transformers>=4.45)
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
@@ -635,6 +596,7 @@ class DiffLlamaPrefix(LlamaModel):
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cond_embedding=diffusion_step,
+                    position_embeddings=position_embeddings,
                 )
 
             hidden_states = layer_outputs[0]
