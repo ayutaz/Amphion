@@ -114,6 +114,9 @@ print('PASS: compute_conditioned_embeddings E2E OK')
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
 
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
+
 - **PyTorch Lightning vs 素のAccelerate**: LightningのforwardメソッドにAlgorithm 1を統合する設計にすれば、conditioned embeddingの計算をモデル内部に閉じ込められる。
 - **実験管理(W&B/MLflow)**: `cond_B` と `cond_Bp` のコサイン類似度をW&Bに記録することで、対照学習の進行状況を定量的にモニタリングできる。
 - **GradNorm動的重み調整**: `pitch_emb` の貢献度を `cond_emb` と比較しながら動的に調整するGradNorm的アプローチを検討すべきだった。

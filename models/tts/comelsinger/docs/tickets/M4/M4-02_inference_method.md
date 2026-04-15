@@ -20,7 +20,7 @@ def comelsinger_inference(
     lyrics: list[str],           # 音素列（ピンイン）
     note_sequence: list[dict],   # [{pitch: int, duration: float}, ...]
     ref_audio: torch.Tensor,     # (1, T) 24kHz
-    n_timesteps: list[int] = [25, 10, 1, 1, 1, 1, 1, 1, 1, 1],
+    n_timesteps: list[int] = [25, 10, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
 ) -> np.ndarray:
     # Step 1: 楽譜トークン化
     phone_ids, pitch_ids, dur_ids = self.tokenize_score(lyrics, note_sequence)
@@ -29,7 +29,7 @@ def comelsinger_inference(
     # Step 3: S2A 第1層（n_timesteps[0]=25）
     acoustic_layer0 = self.s2a_model.inference_layer(semantic_ids, pitch_ids, layer=0,
                                                       n_timesteps=n_timesteps[0])
-    # Step 4: S2A 全層（残り9層）
+    # Step 4: S2A 全層（残り11層, RVQ 12層構成）
     acoustic_tokens = self.s2a_model.inference_all_layers(
         acoustic_layer0, semantic_ids, pitch_ids, n_timesteps=n_timesteps[1:])
     # Step 5: codec decoder
@@ -80,7 +80,7 @@ print('E2E forward pass OK')
 ## 5. 懸念事項とレビュー項目
 
 - **S2A の layer-by-layer 推論 API**: MaskGCT_S2A が `inference_layer` / `inference_all_layers` を公開しているか確認が必要。
-- **n_timesteps リストの長さ**: RVQ 8 層に対して `n_timesteps` が 9 要素（第1層 + 残り8層）か 10 要素かを論文 Section III から確認すること。
+- **n_timesteps リストの長さ**: 要件定義書にて RVQ codebook 数は 12 層と確定している。`n_timesteps` は 12 要素（第1層 `[25]` + 残り11層 `[10, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]`）が正しい。10 要素（RVQ 10 層相当）は誤りなので注意すること。
 
 レビュー項目:
 - [ ] `tokenize_score` が空の歌詞・ノートでも例外を出さないか

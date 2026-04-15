@@ -23,7 +23,11 @@ def pitch_perturbation(
     max_shift: int = 6,
     pitch_vocab_size: int = 129,
 ) -> torch.Tensor:
-    """ピッチトークンにゼロ化またはランダムシフトを適用する。
+    """ピッチトークンにゼロ化またはランダムシフトをサンプル独立に適用する。
+
+    論文 Algorithm 1 および Section III-B の対照学習に基づき、各サンプルに
+    独立した摂動を適用する。バッチ全体に同一の摂動をかけると、全サンプルが
+    同方向に変化するため対照学習ペアの多様性が失われる。
 
     Args:
         pitch_tokens: (B, T) のピッチトークン tensor
@@ -32,12 +36,16 @@ def pitch_perturbation(
         pitch_vocab_size: ピッチ語彙サイズ (clampの上限)
 
     Returns:
-        perturbed: (B, T) 摂動済みピッチトークン
+        perturbed: (B, T) 摂動済みピッチトークン（各サンプルが独立した摂動）
     """
-    if torch.rand(1).item() < zero_prob:
-        return torch.zeros_like(pitch_tokens)
-    shift = torch.randint(-max_shift, max_shift + 1, (1,)).item()
-    perturbed = (pitch_tokens + shift).clamp(0, pitch_vocab_size - 1)
+    B = pitch_tokens.shape[0]
+    perturbed = pitch_tokens.clone()
+    for i in range(B):
+        if torch.rand(1).item() < zero_prob:
+            perturbed[i] = 0
+        else:
+            shift = torch.randint(-max_shift, max_shift + 1, (1,)).item()
+            perturbed[i] = (pitch_tokens[i] + shift).clamp(0, pitch_vocab_size - 1)
     return perturbed
 ```
 
@@ -88,20 +96,36 @@ uv run python -c "
 import torch
 from models.tts.comelsinger.alg1_utils import pitch_perturbation
 
-# 100回実行してzero_prob=0.5に近い統計になること
-pitch = torch.ones(4, 50, dtype=torch.long) * 64
-zero_count = sum(
-    1 for _ in range(100)
-    if pitch_perturbation(pitch, zero_prob=0.5).sum() == 0
-)
-assert 30 <= zero_count <= 70, f'zero_count={zero_count} is out of expected range [30,70]'
-print(f'PASS: zero_count={zero_count}/100 (expected ~50)')
+# 各サンプルが独立した摂動を受けること（全サンプル一律でない）
+torch.manual_seed(0)
+pitch = torch.ones(8, 50, dtype=torch.long) * 64
+perturbed = pitch_perturbation(pitch, zero_prob=0.5)
+# 8サンプル中で少なくとも一部がゼロ化、一部がシフトになるはず（確率的）
+# サンプルごとに異なる摂動が適用されていることを確認
+rows_all_zero = (perturbed == 0).all(dim=1).sum().item()
+rows_nonzero = (perturbed != 0).any(dim=1).sum().item()
+print(f'zero rows={rows_all_zero}, nonzero rows={rows_nonzero}')
+print('PASS: per-sample perturbation runs without error')
+"
+```
+
+```bash
+uv run python -c "
+import torch
+from models.tts.comelsinger.alg1_utils import pitch_perturbation
+
+# 100サンプルに対してzero_prob=0.5の統計がサンプル単位で現れること
+pitch = torch.ones(100, 10, dtype=torch.long) * 64
+perturbed = pitch_perturbation(pitch, zero_prob=0.5)
+zero_rows = (perturbed == 0).all(dim=1).sum().item()
+assert 30 <= zero_rows <= 70, f'zero_rows={zero_rows} is out of expected range [30,70]'
+print(f'PASS: per-sample zero_count={zero_rows}/100 (expected ~50)')
 "
 ```
 
 ## 5. 懸念事項とレビュー項目
 
-- **バッチ全体 vs 要素単位**: 現在の実装はバッチ全体を同一確率で処理する。要素単位（各サンプル独立）の摂動が論文の意図に近い場合は設計変更が必要。論文Section III-Bを再確認する。
+- **バッチ全体 vs 要素単位**: 論文 Section III-B および Algorithm 1 を確認した結果、摂動はサンプル独立に適用する設計が正しい。各サンプルごとに `torch.rand(1)` で独立した確率を引き、ゼロ化かセミトーンシフトかを決定する。バッチ全体に `torch.rand(1)` を使う実装（全サンプル同一摂動）は誤りであり修正済み。
 - **無音トークンの定義**: ゼロ（0）が無音トークンとして定義されているかDataset実装（M2-10）と整合を取ること。
 
 ### レビュー項目
@@ -111,6 +135,9 @@ print(f'PASS: zero_count={zero_count}/100 (expected ~50)')
 - [ ] 元のpitch_tokensテンソルが変更されないこと（in-place操作を避ける）
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
+
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
 
 - **PyTorch Lightning vs 素のAccelerate**: この関数はフレームワーク非依存であり、どちらでも同じ実装になる。
 - **実験管理(W&B/MLflow)**: zero_probやmax_shiftをW&Bのハイパーパラメータとして記録し、最適値をスイープで探索できる構成にする。

@@ -119,6 +119,9 @@ print('PASS: s2a loss weights and LoRA config OK')
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
 
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
+
 - **Hydraの採用**: OmegaConf + Hydraによる階層的設定管理を最初から採用すれば、CLI上書きが容易になり実験管理が改善される。
 - **設定スキーマ検証**: pydanticやdataclassesで設定クラスを定義し、型チェックを実施する構成にすべきだった。
 - **バージョニング**: 設定ファイルに `version: "1.0"` フィールドを追加し、後方互換性を管理できる構造にする。

@@ -106,6 +106,9 @@ print(f'PASS: SCL loss={loss.item():.4f} (finite)')
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
 
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
+
 - **PyTorch Lightning vs 素のAccelerate**: フレームワーク非依存のモジュール。どちらでも同一実装。
 - **実験管理(W&B/MLflow)**: SCL lossの推移とtau値をW&Bに記録。tau=0.07が最適かアブレーションで確認できる環境を最初から構築する。
 - **GradNorm動的重み調整**: SCLとFCLの勾配スケールが大きく異なる場合、GradNormで自動調整することでL_CL全体の安定化が期待できる。

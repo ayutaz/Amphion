@@ -122,6 +122,9 @@ print(f\"PASS: L_total={result['l_total'].item():.4f}\")
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
 
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
+
 - **PyTorch Lightning vs 素のAccelerate**: Lightningでは `optimizer_step` コールバックで grad_clip を一元管理できる。`gradient_clip_val=1.0` の1行で済む。
 - **実験管理(W&B/MLflow)**: grad_normをW&Bに記録し、学習の安定性をリアルタイムモニタリングする仕組みを最初から組み込む。
 - **GradNorm動的重み調整**: lambda_cl, lambda_svt, lambda_mask を固定値ではなくGradNormアルゴリズムで動的更新する実装を最初から設計すべきだった。特にL_SVTの重みがS2Aの学習フェーズによって最適値が変わる可能性がある。

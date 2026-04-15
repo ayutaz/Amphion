@@ -110,6 +110,9 @@ print(f'PASS: L_mask={loss.item():.4f}')
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
 
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
+
 - **PyTorch Lightning vs 素のAccelerate**: MaskGCTのcompute_lossをLightningのtraining_stepに組み込む場合、forward/lossの分離が自然になる。
 - **実験管理(W&B/MLflow)**: L_maskのマスク率ごとの推移をW&Bで記録し、最適なマスクスケジュールを実験的に決定する。
 - **Algorithm 1の関数分解粒度**: compute_l_mask を s2a_model のメソッドとして実装する方が、モデル内部のAPIとして自然。外部関数として実装するとモデルのAPI変更時に対応が困難。

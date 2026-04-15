@@ -117,6 +117,9 @@ print(f'PASS: L_SVT={l_svt.item():.4f}, requires_grad={l_svt.requires_grad}')
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
 
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
+
 - **PyTorch Lightning vs 素のAccelerate**: LightningのforwardにSVT呼び出しを組み込む場合、`self.svt_model.eval()` と `torch.no_grad()` の両立をフックで管理できる。
 - **実験管理(W&B/MLflow)**: L_SVTのL_CE, L_seg, L_durの3成分を個別にW&Bに記録することで、SVT監督のどの要素がS2Aに効いているか分析できる。
 - **GradNorm動的重み調整**: L_SVTの重み(lambda_svt=0.5)を固定するのではなく、GradNormで動的調整することでS2Aの学習安定性が向上する可能性がある。

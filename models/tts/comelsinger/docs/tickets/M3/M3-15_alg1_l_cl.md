@@ -114,6 +114,9 @@ print('PASS: gradient propagation OK')
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
 
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
+
 - **PyTorch Lightning vs 素のAccelerate**: フレームワーク非依存の純粋な数式実装。どちらでも同一。
 - **実験管理(W&B/MLflow)**: L_SCL, L_FCL, L_CL の3値を個別にW&Bに記録し、各損失の相対的な貢献をモニタリングする。
 - **GradNorm動的重み調整**: lambda_scl と lambda_fcl を固定値ではなく学習中に動的調整するGradNorm実装を最初から検討すべきだった。実験でL_FCLが支配的になるケースで有効。

@@ -10,7 +10,7 @@
 
 ## 1. 目的とゴール
 
-要件定義書12の修正値（λ_SCL=1.0, λ_FCL=0.1, λ_SVT=0.5, K_s=8）がコード実装・設定ファイル・ドキュメントの3箇所で一致していることをスクリプトで検証する。M3全体の完了ゲートであり、M4（推論・評価）への移行前に設定の整合性を保証する。
+要件定義書12の修正値（λ_SCL=1.0, λ_FCL=0.1, λ_SVT=0.5, K_s=8, tau=0.07, scheduler=inverse_sqrt）がコード実装・設定ファイル・ドキュメントの3箇所で一致していることをスクリプトで検証する。M3全体の完了ゲートであり、M4（推論・評価）への移行前に設定の整合性を保証する。
 
 ## 2. 実装する内容の詳細
 
@@ -23,9 +23,12 @@ import inspect, torch
 EXPECTED = {
     "lambda_scl": 1.0,
     "lambda_fcl": 0.1,
+    "lambda_cl": 0.5,
     "lambda_svt": 0.5,
     "lambda_mask": 0.3,
     "K_s": 8,
+    "tau": 0.07,                    # SCL/FCL の temperature（論文デフォルト値）
+    "scheduler": "inverse_sqrt",    # S2A 学習率スケジューラタイプ
 }
 
 def crosscheck():
@@ -35,9 +38,14 @@ def crosscheck():
     lw = cfg["loss_weights"]
     assert lw["lambda_scl"] == EXPECTED["lambda_scl"]
     assert lw["lambda_fcl"] == EXPECTED["lambda_fcl"]
+    assert lw.get("lambda_cl") == EXPECTED["lambda_cl"]
     assert lw["lambda_svt"] == EXPECTED["lambda_svt"]
     assert lw["lambda_mask"] == EXPECTED["lambda_mask"]
     assert cfg["training"]["K_s"] == EXPECTED["K_s"]
+    assert cfg["contrastive"].get("tau") == EXPECTED["tau"], \
+        f"tau={cfg['contrastive'].get('tau')} != {EXPECTED['tau']}"
+    assert cfg["scheduler"]["type"] == EXPECTED["scheduler"], \
+        f"scheduler={cfg['scheduler']['type']} != {EXPECTED['scheduler']}"
     print("PASS: config file values OK")
 
     # 2. コードデフォルト値検証
@@ -68,9 +76,15 @@ if __name__ == "__main__":
 ```bash
 uv run python -c "
 # EXPECTED定数の値が要件定義書12の修正値と一致することを確認
-EXPECTED = {'lambda_scl': 1.0, 'lambda_fcl': 0.1, 'lambda_svt': 0.5, 'lambda_mask': 0.3, 'K_s': 8}
+EXPECTED = {
+    'lambda_scl': 1.0, 'lambda_fcl': 0.1, 'lambda_cl': 0.5,
+    'lambda_svt': 0.5, 'lambda_mask': 0.3, 'K_s': 8,
+    'tau': 0.07, 'scheduler': 'inverse_sqrt',
+}
 assert EXPECTED['lambda_scl'] == 1.0, 'lambda_SCL should be 1.0 (NOT 0.5 from original paper)'
 assert EXPECTED['lambda_fcl'] == 0.1, 'lambda_FCL should be 0.1 (NOT 1.0 from original paper)'
+assert EXPECTED['tau'] == 0.07, 'tau (temperature) should be 0.07'
+assert EXPECTED['scheduler'] == 'inverse_sqrt', 'scheduler should be inverse_sqrt'
 print('PASS: EXPECTED values match requirements doc 12')
 "
 ```
@@ -84,10 +98,12 @@ lw = cfg['loss_weights']
 mismatches = []
 if lw.get('lambda_scl') != 1.0: mismatches.append(f'lambda_scl={lw.get(\"lambda_scl\")} != 1.0')
 if lw.get('lambda_fcl') != 0.1: mismatches.append(f'lambda_fcl={lw.get(\"lambda_fcl\")} != 0.1')
+if cfg.get('contrastive', {}).get('tau') != 0.07: mismatches.append(f'tau={cfg.get(\"contrastive\", {}).get(\"tau\")} != 0.07')
+if cfg.get('scheduler', {}).get('type') != 'inverse_sqrt': mismatches.append(f'scheduler={cfg.get(\"scheduler\", {}).get(\"type\")} != inverse_sqrt')
 if mismatches:
     print('FAIL:', mismatches)
 else:
-    print('PASS: s2a_train.yaml SCL/FCL values OK')
+    print('PASS: s2a_train.yaml SCL/FCL/tau/scheduler values OK')
 "
 ```
 
@@ -105,11 +121,16 @@ uv run python tools/crosscheck_config.py
 
 ### レビュー項目
 
-- [ ] 設定ファイルの全重み値が要件定義書12と一致すること
+- [ ] 設定ファイルの全重み値（lambda_scl, lambda_fcl, lambda_cl, lambda_svt, lambda_mask）が要件定義書12と一致すること
+- [ ] `tau=0.07`（SCL/FCL temperature）が設定ファイルの `contrastive.tau` に記載されていること
+- [ ] `scheduler.type=inverse_sqrt` が設定ファイルに記載されていること
 - [ ] コードのデフォルト値が設定ファイルと一致すること
 - [ ] クロスチェックスクリプトがALL PASSで終了すること
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
+
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
 
 - **PyTorch Lightning vs 素のAccelerate**: フレームワーク非依存のチェックスクリプト。ただしLightningのHyperParameterログ機能を使えばMLflowやW&Bで設定値が自動記録され、事後クロスチェックが不要になる。
 - **実験管理(W&B/MLflow)**: 設定値をW&BのConfigとして記録することで、全実験の設定値をダッシュボードで一覧確認できる。手動クロスチェックスクリプトの代わりになる。

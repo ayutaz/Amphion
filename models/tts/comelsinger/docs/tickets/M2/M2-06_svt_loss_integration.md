@@ -19,38 +19,46 @@ M1 で実装した `compute_svt_loss` と M2-01〜M2-05 で完成した `SVTModu
 ```python
 # tests/test_svt_integration.py として作成
 import torch
-import torch.nn.functional as F
 from models.tts.comelsinger.svt_module import SVTModule
+from models.tts.comelsinger.losses import compute_svt_loss  # M1-09 実装の統合テスト
 
 def test_svt_loss_backward():
-    """dummy batchでcompute_svt_lossのbackwardが完走すること"""
-    B, T = 2, 50
+    """dummy batchでcompute_svt_lossのbackwardが完走すること。
+    手動の F.cross_entropy ではなく losses.py の compute_svt_loss を使う統合テスト。
+    """
+    B, T, N = 2, 50, 8  # N=ノート数
     model = SVTModule()
     model.train()
 
     acoustic_tokens = torch.randint(0, 1024, (B, T, 12))
     pitch_tokens    = torch.randint(0, 129,  (B, T))
+    durations       = torch.rand(B, N) * 0.5 + 0.1    # GT デュレーション（秒）
+    dur_preds       = torch.rand(B, N) * 0.5 + 0.1    # 予測デュレーション
     padding_mask    = torch.zeros(B, T, dtype=torch.bool)
 
     out    = model(acoustic_tokens, padding_mask)
     logits = out["logits"]          # (B, T, 129)
 
-    # フラット化してCEを計算（padding位置を除外するためmask適用）
-    valid = ~padding_mask           # (B, T) True=有効フレーム
-    loss = F.cross_entropy(
-        logits[valid],              # (N_valid, 129)
-        pitch_tokens[valid],        # (N_valid,)
+    # losses.py の compute_svt_loss を使って3成分損失を計算
+    total, components = compute_svt_loss(
+        logits=logits,
+        targets=pitch_tokens,
+        durations=durations,
+        dur_preds=dur_preds,
+        padding_mask=padding_mask,
     )
 
-    assert torch.isfinite(loss), f"loss is not finite: {loss.item()}"
-    loss.backward()
+    assert torch.isfinite(total), f"total loss is not finite: {total.item()}"
+    assert "l_ce" in components and "l_seg" in components and "l_dur" in components
+    total.backward()
 
     # 勾配確認
     for name, p in model.named_parameters():
         if p.requires_grad:
             assert p.grad is not None, f"grad is None for {name}"
             assert torch.isfinite(p.grad).all(), f"grad has NaN/Inf: {name}"
-    print(f"PASS: loss={loss.item():.4f}, backward OK")
+    print(f"PASS: total={total.item():.4f}, l_ce={components['l_ce'].item():.4f}, "
+          f"l_seg={components['l_seg'].item():.4f}, l_dur={components['l_dur'].item():.4f}, backward OK")
 
 if __name__ == "__main__":
     test_svt_loss_backward()
@@ -83,14 +91,23 @@ print('PASS: logits are finite')
 
 ```bash
 uv run python -c "
-import torch, torch.nn.functional as F
+import torch
 from models.tts.comelsinger.svt_module import SVTModule
+from models.tts.comelsinger.losses import compute_svt_loss
 m = SVTModule()
-logits = m(torch.randint(0, 1024, (2, 10, 12)))['logits']
-loss = F.cross_entropy(logits.reshape(-1, 129), torch.randint(0, 129, (20,)))
-loss.backward()
-assert torch.isfinite(loss), 'loss is not finite'
-print('PASS: backward completes')
+out = m(torch.randint(0, 1024, (2, 10, 12)))
+logits = out['logits']
+total, comps = compute_svt_loss(
+    logits=logits,
+    targets=torch.randint(0, 129, (2, 10)),
+    durations=torch.rand(2, 4) * 0.5 + 0.1,
+    dur_preds=torch.rand(2, 4) * 0.5 + 0.1,
+    padding_mask=torch.zeros(2, 10, dtype=torch.bool),
+)
+total.backward()
+assert torch.isfinite(total), 'loss is not finite'
+assert 'l_ce' in comps and 'l_seg' in comps and 'l_dur' in comps
+print('PASS: compute_svt_loss backward completes, all 3 components present')
 "
 ```
 
@@ -123,6 +140,6 @@ uv run python tests/test_svt_integration.py
 
 ## 7. 後続タスクへの連絡事項
 
-- **M3-03（SVT 損失計算モジュール）**: このテストで確認した `F.cross_entropy(logits[valid], pitch_tokens[valid])` のパターンを `compute_svt_loss` の実装に採用すること。
+- **M3-03（SVT 損失計算モジュール）**: このテストは `losses.compute_svt_loss` を使った統合テストである。M1-09 実装の `compute_svt_loss(logits, targets, durations, dur_preds, padding_mask)` の引数シグネチャと戻り値 `(total, {"l_ce", "l_seg", "l_dur"})` に本テストを合わせてあること。
 - **M3（SVT 学習パイプライン）**: 本テストを `pytest` に組み込み、CI で自動実行すること。
 - **M2-11〜M2-15（S2A 側）**: SVT 統合テストが通過後、S2A 側から SVT を呼び出す統合テストを M2-14 で追加すること。

@@ -95,6 +95,9 @@ uv run python tools/train_s2a.py \
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
 
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
+
 - **PyTorch Lightning vs 素のAccelerate**: LightningはDDP設定がシンプルで `find_unused_parameters` は自動検出できる場合がある。ただしLoRAとの統合は Accelerate + PEFT の方が事例が多い。
 - **実験管理(W&B/MLflow)**: モデル構築時のパラメータ数（LoRA有効/全体）をW&Bに記録する。LoRAが約4.8%に設定通りか確認できる。
 - **学習率スケジューラ選択**: 逆平方根スケジューラ（InverseSquareRoot）はHuggingFace transformersの `get_scheduler("inverse_sqrt")` で実装可能。ウォームアップステップ数の設定が重要。

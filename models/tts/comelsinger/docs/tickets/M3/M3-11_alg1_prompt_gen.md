@@ -123,6 +123,9 @@ print('PASS: prompt_gen with 32-batch and 5 speakers OK')
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
 
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
+
 - **PyTorch Lightning vs 素のAccelerate**: この関数はフレームワーク非依存だが、DataLoaderにCustomSamplerを組み込んでバッチ構成時点でプロンプトペアを準備する設計が効率的。
 - **実験管理(W&B/MLflow)**: プロンプト選択の話者分布をW&Bに記録し、バッチ内の話者バランスを可視化できる仕組みを入れる。
 - **Algorithm 1の関数分解粒度**: `split_batch → pitch_perturbation → prompt_gen` を一つの `prepare_s2a_batch()` として統合することで、学習ループのコードが読みやすくなる。

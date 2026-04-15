@@ -53,6 +53,22 @@ def compute_svt_f1(
 ### ユニットテスト
 
 ```python
+import pytest
+import torch
+from models.tts.comelsinger.svt_module import SVTModule
+from models.tts.comelsinger.eval.eval_svt_f1 import compute_svt_f1
+
+@pytest.fixture
+def svt_model():
+    model = SVTModule()
+    model.eval()
+    return model
+
+@pytest.fixture
+def dummy_acoustic():
+    # (T, 12) shape: T フレーム、RVQ 12 codebook
+    return torch.randint(0, 1023, (150, 12))
+
 def test_perfect_prediction_gives_one(svt_model):
     # 予測が GT と完全一致する場合、F1=1.0
     tokens = torch.randint(1, 128, (100,))
@@ -60,8 +76,8 @@ def test_perfect_prediction_gives_one(svt_model):
     score = compute_svt_f1_with_mock(tokens, tokens)
     assert abs(score - 1.0) < 1e-5
 
-def test_padding_excluded_from_f1(svt_model):
-    gt = torch.tensor([0, 0, 60, 62, 64, 0])  # 0 はパディング
+def test_padding_excluded_from_f1(svt_model, dummy_acoustic):
+    gt = torch.tensor([0, 0, 60, 62, 64, 0] + [60] * 144)  # 0 はパディング（長さを dummy_acoustic に合わせる）
     # パディングを含めずに F1 を計算することを確認
     score = compute_svt_f1(dummy_acoustic, gt, svt_model)
     assert 0.0 <= score <= 1.0

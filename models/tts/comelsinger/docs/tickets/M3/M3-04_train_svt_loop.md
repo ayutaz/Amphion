@@ -103,6 +103,9 @@ uv run python tools/train_svt.py \
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
 
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
+
 - **PyTorch Lightning vs 素のAccelerate**: Lightningの `training_step` で実装すればloop管理が自動化され、clip_grad_normも `gradient_clip_val=1.0` で設定できる。
 - **実験管理(W&B/MLflow)**: ループ内でのloss記録をW&Bで自動追跡する構成にするとハイパーパラメータ比較が容易。
 - **GradNorm動的重み調整**: 固定のloss weightingではなくGradNormでλを動的調整する実装を最初から検討すべきだった。

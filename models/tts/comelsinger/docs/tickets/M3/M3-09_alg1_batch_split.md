@@ -108,6 +108,9 @@ print('PASS: all keys split correctly')
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
 
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
+
 - **PyTorch Lightning vs 素のAccelerate**: Lightningでは `training_step` 内でこの分割を行う。データフローがより明示的になる。
 - **実験管理(W&B/MLflow)**: K_sをハイパーパラメータとしてW&Bに記録することで、K_sの最適値探索が容易になる。
 - **Algorithm 1の関数分解粒度**: split_batch, pitch_perturbation, prompt_gen を1つの `prepare_batch()` 関数に統合する設計も検討に値する。個別関数の方がテストは容易。

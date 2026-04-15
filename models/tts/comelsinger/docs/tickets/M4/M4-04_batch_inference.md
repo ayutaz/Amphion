@@ -100,3 +100,4 @@ ls outputs/seen_results/*.wav | wc -l  # → 50
 - M4-05〜M4-09 の各評価スクリプトは `output_dir/` の WAV ファイルを入力とする。出力ファイル名の規則（`{sample_id}.wav`）を各チケット担当者に共有すること。
 - M4-10 の ablation では同じ CLI を 6 条件の異なるチェックポイントで繰り返す。`--output_dir` を条件ごとに変えることで対応できる設計にすること。
 - `testset_seen.json` / `testset_unseen.json` のフォーマット仕様を M4-05〜M4-09 担当者に文書化して渡すこと。
+- **M4-12**: バッチ推論完了後（seen/unseen 各 50 発話の全 WAV 生成後）に、生成音声ディレクトリパス（`outputs/seen_results/`, `outputs/unseen_results/`）を M4-12 担当者に共有すること。M4-12 の主観評価はこのディレクトリを参照するため、ファイル数と命名規則を事前に確認すること。

@@ -121,6 +121,9 @@ print(f'PASS: FCL E2E loss={loss.item():.4f}')
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
 
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
+
 - **PyTorch Lightning vs 素のAccelerate**: フレームワーク非依存のモジュール。
 - **実験管理(W&B/MLflow)**: soft label matrixをヒートマップとしてW&Bに記録することで、ピッチ類似度の視覚化が可能になる。
 - **GradNorm動的重み調整**: FCLの勾配がSCLより大きくなりがちなため、GradNormによる自動重み調整で安定化を図るべきだった。

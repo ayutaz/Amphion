@@ -108,6 +108,9 @@ ls runs/test_svt/events.out.* && ls checkpoints/svt_best.pt
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
 
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
+
 - **PyTorch Lightning vs 素のAccelerate**: LightningはModelCheckpointコールバックがある。best model保存のロジックを自分で実装する必要がなくなる。
 - **実験管理(W&B/MLflow)**: W&BはTensorBoardと互換APIがあり、`wandb.init(sync_tensorboard=True)` で移行コストが低い。最初からW&Bにする価値がある。
 - **学習率スケジューラ選択**: CosineAnnealingLRのT_maxとmax_stepsの整合を自動で検証する仕組みが欲しかった。

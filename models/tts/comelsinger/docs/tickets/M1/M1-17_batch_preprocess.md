@@ -51,6 +51,22 @@ def main():
 
 ## 4. 提供範囲とテスト項目
 
+### 4.1 提供範囲（スコープ）
+
+**含むもの**:
+- `models/tts/comelsinger/run_preprocess.py` スクリプト本体
+- `parse_args()` 引数パーサ（`--data_dir`, `--output_dir`, `--device`, `--num_workers` 等）
+- `process_one()` ヘルパー関数（M1-12〜16 の前処理を単一ファイルに適用）
+- `load_manifest()` ヘルパー（M4Singer/Opencpop の JSON マニフェスト読み込み）
+- エラーハンドリング（例外キャッチ → スキップ → errors リストに記録）
+- `metadata.json` 出力（`results` と `errors` の2キー構造）
+
+**含まないもの**:
+- 各前処理モジュール（M1-12〜16）の実装変更
+- データセット固有のマニフェスト変換スクリプト
+- 分散処理（マルチノード対応）
+- DataLoader 統合（→ M2-07）
+
 ### 4.2 ユニットテスト
 
 - `process_one` が例外を投げても `main` がスキップして続行すること

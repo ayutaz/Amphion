@@ -114,6 +114,9 @@ print('PASS: evaluate_svt returns float in [0,1]')
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
 
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
+
 - **PyTorch Lightning vs 素のAccelerate**: Lightningの `validation_step` + `validation_epoch_end` で実装すれば、eval mode切替やno_grad管理が自動化される。
 - **実験管理(W&B/MLflow)**: confusion matrixをW&Bに記録することで、特定のピッチクラスで精度が低い問題を可視化できる。
 - **学習率スケジューラ選択**: バリデーションF1が改善しない場合に学習率を下げる ReduceLROnPlateau を採用すると、固定スケジューラより頑健になる。

@@ -43,7 +43,20 @@
 | 09 | [09_novelty_limitations.md](09_novelty_limitations.md) | 新規性分析・限界・今後の展望 | 504 |
 | 10 | [10_implementation_requirements.md](10_implementation_requirements.md) | 再現実装に必要な要件・依存関係 | 647 |
 
-**合計: 5,332行**
+### 要求定義・要件定義
+
+| # | ファイル | 内容 | 行数 |
+|---|---------|------|------|
+| 11 | [11_requirements_definition.md](11_requirements_definition.md) | 再現実装の要求定義書（全モジュール統合） | 810 |
+| 12 | [12_requirements_specification.md](12_requirements_specification.md) | 要件定義書（MaskGCTコード解析+論文原文確認+技術調査に基づく実装仕様） | 923 |
+
+### プロジェクト管理
+
+| # | ファイル | 内容 | 行数 |
+|---|---------|------|------|
+| 13 | [13_milestones.md](13_milestones.md) | マイルストーン計画書（M0〜M4、81タスク、31-43日） | 565 |
+
+**合計: 7,630行**
 
 ---
 

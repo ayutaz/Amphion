@@ -95,6 +95,9 @@ uv run python tools/verify_dataloader.py \
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
 
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
+
 - **PyTorch Lightning**: `LightningDataModule` を採用すれば、train/val/testのDataLoaderを統一インターフェースで管理でき、検証スクリプトが不要になる。
 - **実験管理**: W&BやMLflowでデータ統計（話者分布、シーケンス長分布）を自動記録する仕組みを入れておく。
 - **型アノテーション付きデータクラス**: バッチ構造を `TypedDict` や dataclass で定義し、静的型チェックで不整合を早期発見する。

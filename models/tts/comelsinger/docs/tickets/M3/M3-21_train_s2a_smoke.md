@@ -97,6 +97,9 @@ uv run python tools/smoke_test_s2a.py
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
 
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
+
 - **PyTorch Lightning vs 素のAccelerate**: Lightningでは `fast_dev_run=5` で5バッチのみ実行するスモークテストが内蔵されており、専用スクリプトが不要になる。
 - **実験管理(W&B/MLflow)**: スモークテストの結果をW&Bで本番実験と比較できるよう、実験名に `smoke_` プレフィックスをつけて記録する仕組みを最初から設計する。
 - **GradNorm動的重み調整**: スモークテスト段階で各損失の相対的なgrad normを計測し、本番実験でのGradNorm設定値を決定するための情報収集に活用できる。

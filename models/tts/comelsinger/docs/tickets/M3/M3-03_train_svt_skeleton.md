@@ -105,6 +105,9 @@ print('PASS: skeleton runs with config file')
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
 
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
+
 - **PyTorch Lightning vs 素のAccelerate**: LightningのTrainerを使えばdry-runは `fast_dev_run=True` で提供済み。骨格実装のコストが削減できる。
 - **実験管理(W&B/MLflow)**: 骨格段階から `wandb.init()` か `mlflow.start_run()` を組み込むべき。後付けは困難。
 - **設定管理**: Hydraを最初から使えばargparse不要で、設定のオーバーライドがCLIから可能。

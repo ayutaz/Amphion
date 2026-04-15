@@ -41,11 +41,19 @@ def compute_svt_loss(
     valid_mask = ~padding_mask.view(-1)
     l_ce = l_ce[valid_mask].mean()
 
-    # L_seg: 境界遷移損失（隣接フレーム間のトークン変化をペナルティ）
-    pred = logits.argmax(dim=-1)        # (B, T)
-    boundary = (pred[:, 1:] != pred[:, :-1]).float()  # (B, T-1)
-    target_boundary = (targets[:, 1:] != targets[:, :-1]).float()
-    l_seg = F.binary_cross_entropy(boundary.clamp(1e-6, 1 - 1e-6), target_boundary)
+    # L_seg: セグメント境界損失（論文 式(7) に基づくユークリッド距離ベース）
+    # b_t = 1 if ground-truth pitch changes at frame t, else 0
+    # 境界フレーム (b_t=1): max(0, delta - ||p_t - p_{t-1}||^2) — 距離が小さい場合にペナルティ
+    # 非境界フレーム (b_t=0): ||p_t - p_{t-1}||^2 — 距離が大きい場合にペナルティ
+    # 参考: 論文 Section III-C 式(7)
+    p = logits.softmax(dim=-1)          # (B, T, V) ソフトマックス後の確率分布
+    p_curr  = p[:, 1:, :]               # (B, T-1, V) t 番目フレーム
+    p_prev  = p[:, :-1, :]              # (B, T-1, V) t-1 番目フレーム
+    # ||p_t - p_{t-1}||^2 をフレームペアごとに計算
+    dist_sq = ((p_curr - p_prev) ** 2).sum(dim=-1)  # (B, T-1)
+    b_t = (targets[:, 1:] != targets[:, :-1]).float()  # (B, T-1) GT 境界インジケータ
+    l_seg_per = (1 - b_t) * dist_sq + b_t * (delta - dist_sq).clamp(min=0.0)
+    l_seg = l_seg_per.mean()
 
     # L_dur: ソフトデュレーション損失（Huber 損失で δ=0.5）
     l_dur = F.huber_loss(dur_preds, durations, delta=delta)
@@ -86,13 +94,13 @@ def compute_svt_loss(
 ### 5.1 懸念事項
 
 - 全フレームがパディングの場合、`l_ce` の計算対象が空テンソルになり `mean()` が NaN になる。`valid_mask.any()` でガードが必要
-- `L_seg` の `binary_cross_entropy` は `boundary` が連続値でない場合に定義が不明確。`F.binary_cross_entropy_with_logits` への変更を検討
+- `L_seg` は論文 Section III-C 式(7) に基づくユークリッド距離ベースの損失に修正済み。当初 `binary_cross_entropy` を使う設計だったが、論文の正確な定義はピッチ確率分布間の L2 距離で境界/非境界を制御するものであるため、BCEを使う実装は誤りであった。現在は `softmax` 後の確率分布 `p_t` に対して `||p_t - p_{t-1}||²` を計算する正しい実装に変更済み
 - デュレーション `durations` の単位（秒 vs フレーム数）を学習パイプラインと統一する必要がある
 
 ### 5.2 レビュー項目
 
 - [ ] `l_ce` の `ignore_index=-1` とパディング処理が一致しているか（`padding_mask` → `-1` への変換）
-- [ ] `L_seg` の定義が論文数式(8)と一致しているか
+- [ ] `L_seg` の定義が論文数式(7)（ユークリッド距離ベース）と一致しているか。BCE ベースの誤実装がないことを確認
 - [ ] `delta=0.5` の Huber 損失が論文に記載の「soft duration loss」の意図と合致しているか
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら

@@ -105,6 +105,9 @@ print('PASS: all required scalars in TensorBoard')
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
 
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
+
 - **PyTorch Lightning vs 素のAccelerate**: Lightningは `self.log()` 1行で全プロセス集計・TensorBoard記録・プログレスバー表示が自動化される。手動の `log_metrics()` 関数が不要になる。
 - **実験管理(W&B/MLflow)**: W&BはTensorBoardより視覚化が優れており、複数実験の比較が容易。最初からW&B `wandb.log()` を採用すべきだった。
 - **学習率スケジューラ選択**: 逆平方根スケジューラは急激な減衰をするため、TensorBoardのlrグラフで可視化しておくと問題の早期発見ができる。

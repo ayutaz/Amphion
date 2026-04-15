@@ -95,6 +95,9 @@ uv run python tools/smoke_test_svt.py
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
 
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
+
 - **PyTorch Lightning vs 素のAccelerate**: LightningのTrainerは `fast_dev_run=True` でスモークテスト相当の機能を内蔵する。専用スクリプトが不要になる。
 - **実験管理(W&B/MLflow)**: スモークテストの結果をW&Bに自動記録し、本番実験と比較できる仕組みを最初から構築する。
 - **学習率スケジューラ選択**: 1000ステップ程度では CosineAnnealingLR のウォームアップ段階のみ。ウォームアップ付きスケジューラ（LinearWarmup + Cosine）での確認が必要。

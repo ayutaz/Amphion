@@ -111,6 +111,9 @@ ls checkpoints/test_s2a/s2a_best/adapter_model.bin
 
 ## 6. フェーズ振り返り: 一から作り直すとしたら
 
+> 共通の設計判断（PyTorch Lightning vs Accelerate、実験管理、スケジューラ選択）は [M3_design_decisions.md](M3_design_decisions.md) を参照のこと。以下はこのチケット固有の設計判断を記載する。
+
+
 - **PyTorch Lightning vs 素のAccelerate**: LightningのModelCheckpointコールバックはepoch保存とbest model保存を自動管理する。`save_top_k=3` でbest-k件のみ保持できる。
 - **実験管理(W&B/MLflow)**: W&BのArtifact機能でLoRAチェックポイントをバージョン管理することで、実験の再現性と比較が容易になる。
 - **学習率スケジューラ選択**: チェックポイント保存後の学習再開時に、スケジューラのstep数を正確に復元する必要がある。スケジューラのstate_dictも同時に保存すべきだった。
