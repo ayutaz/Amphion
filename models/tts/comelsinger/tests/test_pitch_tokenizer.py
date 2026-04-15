@@ -387,7 +387,9 @@ class TestDecodeTokenToFreq:
         """Token 128 should return a valid frequency ~12543.9 Hz."""
         f = tok.decode_token_to_freq(128)
         assert math.isfinite(f)
-        assert abs(f - 12543.85) < 1.0  # within 1 Hz
+        # MIDI 128 = 440 * 2^((128-69)/12) ≈ 13289.75 Hz
+        expected = 440.0 * (2.0 ** ((128 - 69) / 12.0))
+        assert abs(f - expected) < 0.01
 
 
 # ---------------------------------------------------------------------------
