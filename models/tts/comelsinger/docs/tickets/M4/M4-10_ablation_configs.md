@@ -62,8 +62,10 @@ def test_wo_cl_disables_contrastive():
 
 def test_full_enables_all():
     cfg = OmegaConf.load("configs/ablation/full.yaml")
-    assert cfg.model.s2a.loss.lambda_scl == 0.5
-    assert cfg.model.s2a.loss.lambda_svt == 0.1
+    assert cfg.model.s2a.loss.lambda_scl == 1.0
+    assert cfg.model.s2a.loss.lambda_fcl == 0.1
+    assert cfg.model.s2a.loss.lambda_cl == 0.5
+    assert cfg.model.s2a.loss.lambda_svt == 0.5
 ```
 
 ### E2Eテスト
@@ -84,7 +86,7 @@ ls outputs/ablation/  # → 6 ディレクトリ
 - **チェックポイントパスの管理**: 各条件で異なるチェックポイントを参照するため、存在しないパスを指定してもエラーが推論開始まで出ない。起動時にパス存在確認をすること。
 
 レビュー項目:
-- [ ] `full.yaml` が論文のデフォルト重み（λ_SCL=0.5, λ_FCL=1.0, λ_SVT=0.1）を正確に反映しているか
+- [ ] `full.yaml` が要件定義書12確定値（λ_SCL=1.0, λ_FCL=0.1, λ_CL=0.5, λ_SVT=0.5）を正確に反映しているか
 - [ ] 各 YAML のチェックポイントパスが実際のディレクトリ構造と一致しているか
 - [ ] `OmegaConf.merge` での上書き順序が正しいか
 

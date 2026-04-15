@@ -42,6 +42,7 @@ training:
 loss_weights:
   lambda_scl: 1.0
   lambda_fcl: 0.1
+  lambda_cl: 0.5
   lambda_svt: 0.5
   lambda_mask: 0.3
   lambda_seg: 3.0
@@ -86,6 +87,7 @@ with open('configs/comelsinger/s2a_train.yaml') as f:
 assert cfg['training']['K_s'] == 8
 assert cfg['loss_weights']['lambda_scl'] == 1.0
 assert cfg['loss_weights']['lambda_fcl'] == 0.1
+assert cfg['loss_weights']['lambda_cl'] == 0.5
 print('PASS: s2a_train.yaml values OK')
 "
 ```

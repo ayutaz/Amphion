@@ -37,7 +37,7 @@ def compute_l_svt(
     """
     with torch.no_grad():
         svt_out = svt_model(acoustic_tokens)
-    loss_dict = svt_model.compute_svt_loss_from_logits(
+    loss_dict = svt_model.compute_svt_loss(
         logits=svt_out["logits"].detach(),
         pitch_tokens=pitch_tokens,
     )
@@ -106,7 +106,7 @@ print(f'PASS: L_SVT={l_svt.item():.4f}, requires_grad={l_svt.requires_grad}')
 
 ## 5. 懸念事項とレビュー項目
 
-- **compute_svt_loss_from_logits の設計**: SVTのforwardとloss計算を分離する必要がある。`torch.no_grad()` でlogitsを取得し、その後 `.detach()` でgrpah切断した上でlossを計算する。
+- **compute_svt_loss の設計**: SVTのforwardとloss計算を分離する必要がある。`torch.no_grad()` でlogitsを取得し、その後 `.detach()` でgraph切断した上でlossを計算する（M1-09で定義済みの `compute_svt_loss` を使用すること）。
 - **acoustic_tokens の勾配**: L_SVTはS2Aの生成したacoustic_tokensを入力とするが、学習中はacoustic_tokensがstraight-throughで勾配を受け取るか確認が必要。
 
 ### レビュー項目
