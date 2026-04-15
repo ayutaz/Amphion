@@ -148,6 +148,11 @@ class TestQuantizeF0:
         result = tok.quantize_f0(np.array([220.0] * 3), 1)
         assert result[0].item() == 57
 
+    def test_quantize_f0_negative_values(self, tok: PitchTokenizer) -> None:
+        """Negative F0 values should be treated as unvoiced."""
+        result = tok.quantize_f0(np.array([-1.0, -100.0]), 1)
+        assert result[0].item() == 0
+
 
 # ---------------------------------------------------------------------------
 # TestTokenizeScore

@@ -132,9 +132,12 @@ class TestFCLLoss:
 
 
 def _make_svt_inputs(B=2, L=20, C=129, n_notes=4):
-    """Helper: create minimal valid SVT loss inputs."""
+    """Helper: create minimal valid SVT loss inputs.
+
+    Returns logits (raw, pre-softmax) as the first element to match the
+    updated compute_svt_loss signature.
+    """
     logits = torch.randn(B, L, C)
-    pitch_probs = F.softmax(logits, dim=-1)
     target_pitch_tokens = torch.randint(1, C, (B, L))
 
     # Distribute L frames evenly across n_notes
@@ -150,7 +153,7 @@ def _make_svt_inputs(B=2, L=20, C=129, n_notes=4):
         pitch_note_labels.append([torch.randint(1, C, (1,)).item() for _ in range(n_notes)])
 
     attention_mask = torch.ones(B, L)
-    return pitch_probs, target_pitch_tokens, frame_alignment, pitch_note_labels, attention_mask
+    return logits, target_pitch_tokens, frame_alignment, pitch_note_labels, attention_mask
 
 
 class TestSVTLoss:
@@ -164,15 +167,16 @@ class TestSVTLoss:
         frame_alignment = [[frames_per_note] * n_notes for _ in range(B)]
         pitch_labels = [torch.randint(1, C, (n_notes,)).tolist() for _ in range(B)]
 
-        # Construct pitch_probs such that for each note, probs[t, m_p_i] = 1.0
-        # This means prob_sum = frames_per_note exactly -> l_dur = 0
-        pitch_probs = torch.zeros(B, L, C)
+        # Construct logits such that softmax(logits)[t, m_p_i] ≈ 1.0 for each note span.
+        # Using a large positive value for the correct class forces probs ≈ 1.0,
+        # so prob_sum ≈ frames_per_note -> l_dur ≈ 0.
+        logits = torch.full((B, L, C), -1e9)
         for b in range(B):
             t = 0
-            for i, (a_d, m_p) in enumerate(zip(frame_alignment[b], pitch_labels[b])):
-                pitch_probs[b, t : t + a_d, m_p] = 1.0
+            for a_d, m_p in zip(frame_alignment[b], pitch_labels[b]):
+                logits[b, t : t + a_d, m_p] = 1e9
                 t += a_d
-        pitch_probs.requires_grad_(True)
+        logits.requires_grad_(True)
 
         target_pitch_tokens = torch.zeros(B, L, dtype=torch.long)
         for b in range(B):
@@ -184,7 +188,7 @@ class TestSVTLoss:
         attention_mask = torch.ones(B, L)
 
         total, parts = compute_svt_loss(
-            pitch_probs,
+            logits,
             target_pitch_tokens,
             frame_alignment,
             pitch_labels,
@@ -194,11 +198,11 @@ class TestSVTLoss:
 
     def test_zero_lambda_excludes(self):
         """lambda_seg=0, lambda_dur=0 -> total equals l_ce."""
-        pitch_probs, target_pitch_tokens, fa, pl, am = _make_svt_inputs()
-        pitch_probs = pitch_probs.detach().requires_grad_(True)
+        logits, target_pitch_tokens, fa, pl, am = _make_svt_inputs()
+        logits = logits.detach().requires_grad_(True)
 
         total, parts = compute_svt_loss(
-            pitch_probs,
+            logits,
             target_pitch_tokens,
             fa,
             pl,
@@ -210,29 +214,27 @@ class TestSVTLoss:
 
     def test_return_dict_keys(self):
         """Returned dict must contain exactly l_ce, l_seg, l_dur."""
-        pitch_probs, target_pitch_tokens, fa, pl, am = _make_svt_inputs()
-        _, parts = compute_svt_loss(pitch_probs, target_pitch_tokens, fa, pl, attention_mask=am)
+        logits, target_pitch_tokens, fa, pl, am = _make_svt_inputs()
+        _, parts = compute_svt_loss(logits, target_pitch_tokens, fa, pl, attention_mask=am)
         assert set(parts.keys()) == {"l_ce", "l_seg", "l_dur"}
 
     def test_backward_propagates(self):
-        """total must be differentiable w.r.t. pitch_probs."""
-        pitch_probs, target_pitch_tokens, fa, pl, am = _make_svt_inputs()
-        logits = torch.randn_like(pitch_probs)
-        logits.requires_grad_(True)
-        pitch_probs = F.softmax(logits, dim=-1)
+        """total must be differentiable w.r.t. logits."""
+        logits, target_pitch_tokens, fa, pl, am = _make_svt_inputs()
+        logits = logits.detach().requires_grad_(True)
 
-        total, _ = compute_svt_loss(pitch_probs, target_pitch_tokens, fa, pl, attention_mask=am)
+        total, _ = compute_svt_loss(logits, target_pitch_tokens, fa, pl, attention_mask=am)
         total.backward()
         assert logits.grad is not None
 
     def test_all_padding(self):
         """All-padding attention_mask -> l_ce is finite (not NaN)."""
         B, L, C = 2, 20, 129
-        pitch_probs, target_pitch_tokens, fa, pl, _ = _make_svt_inputs(B=B, L=L, C=C)
+        logits, target_pitch_tokens, fa, pl, _ = _make_svt_inputs(B=B, L=L, C=C)
         all_padding = torch.zeros(B, L)  # 0 = masked out everywhere
 
         total, parts = compute_svt_loss(
-            pitch_probs,
+            logits,
             target_pitch_tokens,
             fa,
             pl,
@@ -240,6 +242,15 @@ class TestSVTLoss:
         )
         assert torch.isfinite(parts["l_ce"]), f"l_ce is NaN/Inf: {parts['l_ce']}"
         assert torch.isfinite(total), f"total is NaN/Inf: {total}"
+
+    def test_svt_loss_single_batch(self):
+        """B=1 should work without error."""
+        torch.manual_seed(42)
+        logits = torch.randn(1, 20, 129)
+        targets = torch.randint(1, 129, (1, 20))
+        mask = torch.ones(1, 20)
+        total, detail = compute_svt_loss(logits, targets, [[4, 4, 4, 4, 4]], [[60, 62, 64, 67, 69]], mask)
+        assert torch.isfinite(total)
 
 
 # ---------------------------------------------------------------------------

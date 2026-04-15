@@ -64,6 +64,15 @@ def compute_fcl_loss(
         3. valid = (Y != 0).float()
         4. n_valid = valid.sum().clamp(min=1.0)
         5. loss = -(valid * Y * S).sum() / n_valid
+
+    NOTE: This implementation uses log_softmax + row-normalized soft labels
+    (KL-divergence style), which differs from the requirements specification's
+    formulation `-(valid * Y * S).sum() / n_valid`. The log_softmax approach is:
+    1. More numerically stable with small tau
+    2. Closer to the paper's description (Section III-B, eq.5-6)
+    The row normalization `Y / row_sum` converts hard labels to probability
+    distributions per frame, making the loss well-defined for rows with
+    multiple positive entries.
     """
     B, L, D = f_a.shape
 
@@ -91,7 +100,7 @@ def compute_fcl_loss(
 
 
 def compute_svt_loss(
-    pitch_probs: torch.Tensor,
+    pitch_logits: torch.Tensor,
     target_pitch_tokens: torch.Tensor,
     frame_alignment: list,
     pitch_note_labels: list,
@@ -103,7 +112,7 @@ def compute_svt_loss(
     """SVT pitch supervision loss (3 components).
 
     Args:
-        pitch_probs: (B, L, C) softmax probabilities from SVT
+        pitch_logits: (B, L, C) raw logits from SVT (before softmax)
         target_pitch_tokens: (B, L) ground truth pitch tokens
         frame_alignment: list of lists, each inner list = frame counts per note [a_d_1, a_d_2, ...]
         pitch_note_labels: list of lists, each inner list = pitch token per note [m_p_1, m_p_2, ...]
@@ -112,39 +121,28 @@ def compute_svt_loss(
     Returns:
         (total_loss, {"l_ce": ..., "l_seg": ..., "l_dur": ...})
 
-    L_CE: CrossEntropy (padding excluded via attention_mask)
+    L_CE: F.cross_entropy (padding excluded via ignore_index=-100)
     L_seg: paper eq.(7) Euclidean distance based
         sum_t [(1-b_t)*||p_t - p_{t-1}||^2 + b_t * max(0, delta - ||p_t - p_{t-1}||^2)]
         where b_t = 1 if note boundary at t, else 0
     L_dur: paper eq.(8) soft duration
         sum_i (sum_{t=T_i}^{T_i+a_d_i-1} p_t[m_p_i] - a_d_i)^2
     """
-    B, L, C = pitch_probs.shape
+    B, L, C = pitch_logits.shape
+    pitch_probs = F.softmax(pitch_logits, dim=-1)  # (B, L, C) for L_seg and L_dur
 
-    # ---- L_CE: CrossEntropy (exclude padding) ----
-    log_probs = torch.log(pitch_probs.clamp(min=1e-8))  # (B, L, C)
-
+    # ---- L_CE: F.cross_entropy with ignore_index for padding ----
     if attention_mask is not None:
-        # Flatten and mask out padding positions
-        log_probs_flat = log_probs.view(-1, C)  # (B*L, C)
-        targets_flat = target_pitch_tokens.view(-1)  # (B*L,)
-        valid_flat = attention_mask.view(-1).bool()  # (B*L,)
-
+        valid_flat = attention_mask.view(-1).bool()
         if valid_flat.any():
-            l_ce = F.nll_loss(
-                log_probs_flat[valid_flat],
-                targets_flat[valid_flat],
-                reduction="mean",
-            )
+            targets = target_pitch_tokens.clone()
+            targets[~attention_mask.bool()] = -100  # PyTorch ignore_index
+            l_ce = F.cross_entropy(pitch_logits.view(-1, C), targets.view(-1), ignore_index=-100)
         else:
-            # All padding: return zero loss
-            l_ce = pitch_probs.sum() * 0.0
+            # All padding: return zero loss (keep graph connected)
+            l_ce = pitch_logits.sum() * 0.0
     else:
-        l_ce = F.nll_loss(
-            log_probs.view(-1, C),
-            target_pitch_tokens.view(-1),
-            reduction="mean",
-        )
+        l_ce = F.cross_entropy(pitch_logits.view(-1, C), target_pitch_tokens.view(-1))
 
     # ---- L_seg: Euclidean distance based segment boundary loss (eq.(7)) ----
     if L > 1:
@@ -166,9 +164,8 @@ def compute_svt_loss(
         l_seg = pitch_probs.sum() * 0.0
 
     # ---- L_dur: soft duration loss (eq.(8)) ----
-    # Each note contributes: (sum of predicted prob for correct pitch in the note span - n_frames)^2
-    l_dur_total = pitch_probs.sum() * 0.0  # keep graph connected; initialize to zero
-    n_notes = 0
+    # Collect all voiced spans first, then batch-compute to reduce GPU syncs
+    spans = []  # list of (batch_idx, t_start, t_end, pitch_class, expected_frames)
     for b in range(B):
         t_start = 0
         for a_d_i, m_p_i in zip(frame_alignment[b], pitch_note_labels[b]):
@@ -178,12 +175,17 @@ def compute_svt_loss(
             t_end = min(t_start + a_d_i, L)
             if t_start >= L:
                 break
-            # sum of predicted probability for the correct pitch class over the note span
-            prob_sum = pitch_probs[b, t_start:t_end, m_p_i].sum()
-            l_dur_total = l_dur_total + (prob_sum - a_d_i) ** 2
-            n_notes += 1
+            spans.append((b, t_start, t_end, m_p_i, a_d_i))
             t_start += a_d_i
-    l_dur = l_dur_total / max(n_notes, 1)
+
+    if len(spans) == 0:
+        l_dur = pitch_probs.sum() * 0.0
+    else:
+        dur_losses = []
+        for b, ts, te, mp, ad in spans:
+            prob_sum = pitch_probs[b, ts:te, mp].sum()
+            dur_losses.append((prob_sum - ad) ** 2)
+        l_dur = torch.stack(dur_losses).mean()
 
     total = l_ce + lambda_seg * l_seg + lambda_dur * l_dur
     return total, {"l_ce": l_ce, "l_seg": l_seg, "l_dur": l_dur}
@@ -214,10 +216,10 @@ def compute_total_loss(
     l_cl = lambda_scl * l_scl + lambda_fcl * l_fcl
     total = lambda_cl * l_cl + lambda_svt * l_svt + lambda_mask * l_mask
     return total, {
-        "l_scl": l_scl,
-        "l_fcl": l_fcl,
-        "l_cl": l_cl,
-        "l_svt": l_svt,
-        "l_mask": l_mask,
-        "l_total": total,
+        "l_scl": l_scl.detach(),
+        "l_fcl": l_fcl.detach(),
+        "l_cl": l_cl.detach(),
+        "l_svt": l_svt.detach(),
+        "l_mask": l_mask.detach(),
+        "l_total": total.detach(),
     }

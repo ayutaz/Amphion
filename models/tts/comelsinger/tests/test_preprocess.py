@@ -268,6 +268,15 @@ class TestPhoneIdsBasic:
         assert (result >= 0).all()
 
 
+class TestPhoneIdsEdgeCases:
+    def test_phone_ids_empty_string(self):
+        """Empty string should return empty tensor."""
+        from models.tts.comelsinger.preprocess import extract_phone_ids
+        ids = extract_phone_ids("", {"<unk>": 0})
+        assert ids.dtype == torch.long
+        assert ids.numel() == 0
+
+
 class TestPhoneIdsUnknownFallback:
     def test_unknown_char_falls_back_to_unk_id(self):
         """Characters not in phone2id must map to phone2id['<unk>']."""

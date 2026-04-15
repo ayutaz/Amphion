@@ -30,40 +30,43 @@ class PitchTokenizer:
 
         For each EnCodec frame, takes the median of voiced F0 samples in the
         corresponding F0 time window, converts to MIDI, and clamps to [1, 128].
-        Unvoiced frames (f0 == 0 or NaN) produce token 0.
+        Unvoiced frames (f0 <= 0 or NaN) produce token 0.
 
         Args:
-            f0: F0 array (T_f0,) in Hz. Unvoiced frames are 0.0.
+            f0: F0 array (T_f0,) in Hz. Unvoiced frames are 0.0 or negative.
             target_len: Output token sequence length (= acoustic token frame count T_a).
 
         Returns:
             tokens: shape (target_len,), dtype torch.long, values in [0, 128].
         """
-        tokens = torch.zeros(target_len, dtype=torch.long)
+        f0 = np.asarray(f0, dtype=np.float64)
+        T_f0 = len(f0)
+        tokens = np.zeros(target_len, dtype=np.int64)
+
+        # Compute frame boundaries in bulk (vectorized)
+        boundaries = np.round(
+            np.arange(target_len + 1) * self.f0_fps / self.encodec_fps
+        ).astype(int)
+        boundaries = np.clip(boundaries, 0, T_f0)
 
         for i in range(target_len):
-            start = round(i * self.f0_fps / self.encodec_fps)
-            end = round((i + 1) * self.f0_fps / self.encodec_fps)
-            # Clamp end to f0 length; ensure at least start+1 for edge cases
-            end = max(end, start + 1)
-            end = min(end, len(f0))
-
-            if start >= len(f0):
-                tokens[i] = 0
-                continue
+            start, end = boundaries[i], boundaries[i + 1]
+            if start >= end:
+                end = min(start + 1, T_f0)
+            if start >= T_f0:
+                continue  # already zero
 
             frame = f0[start:end]
-            # Filter out unvoiced (0.0) and NaN frames
+            # Filter out unvoiced (<= 0) and NaN frames
             voiced = frame[(frame > 0) & np.isfinite(frame)]
             if len(voiced) == 0:
-                tokens[i] = 0  # unvoiced
-                continue
+                continue  # already zero
 
             f_median = float(np.median(voiced))
             midi = round(12.0 * math.log2(f_median / 440.0) + 69)
             tokens[i] = max(1, min(128, midi))
 
-        return tokens
+        return torch.from_numpy(tokens).long()
 
     def tokenize_score(
         self,
