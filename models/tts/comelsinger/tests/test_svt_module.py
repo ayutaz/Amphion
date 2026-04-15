@@ -4,7 +4,7 @@ Covers acceptance criteria for all M2 SVTModule tickets:
   M2-01: class skeleton and parameter count
   M2-02: codebook embeddings + input projection
   M2-03: positional encoding shape and padding mask support
-  M2-04: forward pass output shapes and probs validity
+  M2-04: forward pass output shapes (logits only)
   M2-05: freeze / unfreeze utilities
   M2-06: SVTModule.forward + compute_svt_loss backward integration
 """
@@ -204,40 +204,12 @@ class TestForward:
             f"expected ({B}, {L}, 129), got {out['logits'].shape}"
         )
 
-    def test_output_probs_shape(self):
-        """Output probs tensor has shape (B, L, 129)."""
-        model = SVTModule()
-        B, L = 3, 40
-        acoustic_tokens = torch.randint(0, 1024, (B, L, 12))
-        out = model(acoustic_tokens)
-        assert out["probs"].shape == (B, L, 129), (
-            f"expected ({B}, {L}, 129), got {out['probs'].shape}"
-        )
-
-    def test_probs_sum_to_one(self):
-        """probs.sum(-1) is approximately 1.0 for every frame."""
-        model = SVTModule()
-        B, L = 2, 30
-        acoustic_tokens = torch.randint(0, 1024, (B, L, 12))
-        out = model(acoustic_tokens)
-        sums = out["probs"].sum(dim=-1)  # (B, L)
-        assert torch.allclose(sums, torch.ones_like(sums), atol=1e-5), (
-            f"probs should sum to 1 but max deviation: {(sums - 1).abs().max().item()}"
-        )
-
-    def test_probs_non_negative(self):
-        """All probability values are >= 0."""
-        model = SVTModule()
-        acoustic_tokens = torch.randint(0, 1024, (2, 20, 12))
-        out = model(acoustic_tokens)
-        assert (out["probs"] >= 0).all()
-
     def test_output_keys(self):
-        """Forward output dict contains exactly 'logits' and 'probs'."""
+        """Forward output dict contains exactly 'logits'."""
         model = SVTModule()
         acoustic_tokens = torch.randint(0, 1024, (1, 10, 12))
         out = model(acoustic_tokens)
-        assert set(out.keys()) == {"logits", "probs"}
+        assert set(out.keys()) == {"logits"}
 
     def test_no_attention_mask(self):
         """Forward works when attention_mask=None (default)."""

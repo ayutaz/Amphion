@@ -1,6 +1,7 @@
 """CoMelSinger Dataset, Sampler, and collate function."""
 from __future__ import annotations
 
+import json
 import random
 from collections import defaultdict
 from pathlib import Path
@@ -24,22 +25,40 @@ class CoMelSingerDataset(Dataset):
         speaker_id: int/long scalar
     """
 
-    def __init__(self, data_dir: str | Path) -> None:
+    def __init__(self, data_dir: str | Path, manifest_path: str | Path | None = None) -> None:
         self.data_dir = Path(data_dir)
         token_dir = self.data_dir / "tokens"
         if not token_dir.exists():
             token_dir = self.data_dir  # fallback: .pt files directly in data_dir
-        self.samples = sorted(token_dir.glob("*.pt"))
+
+        manifest_file = self.data_dir / "manifest.json" if manifest_path is None else Path(manifest_path)
+
+        if manifest_file.exists():
+            # Fast path: read pre-computed manifest
+            with open(manifest_file) as f:
+                manifest = json.load(f)
+            self.samples = [Path(m["path"]) for m in manifest]
+            self.speaker_ids: List[int] = [m["speaker_id"] for m in manifest]
+        else:
+            # Slow path: scan .pt files and build manifest
+            self.samples = sorted(token_dir.glob("*.pt"))
+            if not self.samples:
+                raise ValueError(f"No .pt files found in {token_dir}")
+            self.speaker_ids = []
+            for path in self.samples:
+                data = torch.load(path, map_location="cpu", weights_only=True)
+                self.speaker_ids.append(int(data["speaker_id"]))
+            # Save manifest for next time
+            manifest = [{"path": str(p), "speaker_id": s} for p, s in zip(self.samples, self.speaker_ids)]
+            with open(manifest_file, "w") as f:
+                json.dump(manifest, f)
+
         if not self.samples:
             raise ValueError(f"No .pt files found in {token_dir}")
 
         # Build speaker index for BalancedSpeakerSampler
-        self.speaker_ids: List[int] = []
         self.speaker_to_indices: Dict[int, List[int]] = defaultdict(list)
-        for idx, path in enumerate(self.samples):
-            data = torch.load(path, map_location="cpu", weights_only=True)
-            sid = int(data["speaker_id"])
-            self.speaker_ids.append(sid)
+        for idx, sid in enumerate(self.speaker_ids):
             self.speaker_to_indices[sid].append(idx)
 
     def __len__(self) -> int:
@@ -105,10 +124,11 @@ class BalancedSpeakerSampler(Sampler):
         all_indices = list(range(len(self.speaker_ids)))
         rng.shuffle(all_indices)
 
-        # Generate batches
-        remaining = list(all_indices)
+        # Generate batches — use set for O(1) membership checks
+        remaining = set(all_indices)
         while len(remaining) >= self.batch_size:
             batch = []
+            batch_set = set()
 
             # First k_s: pick a speaker with >=2 samples, add pair + fill rest
             speaker = rng.choice(self.eligible_speakers)
@@ -116,20 +136,22 @@ class BalancedSpeakerSampler(Sampler):
             rng.shuffle(pool)
             pair = pool[:2]
             batch.extend(pair)
+            batch_set.update(pair)
             # Fill remaining k_s slots from remaining indices
             fill_needed = self.k_s - len(batch)
-            fill_candidates = [i for i in remaining if i not in batch]
+            fill_candidates = list(remaining - batch_set)
             rng.shuffle(fill_candidates)
             batch.extend(fill_candidates[:fill_needed])
+            batch_set.update(fill_candidates[:fill_needed])
 
             # Rest of batch (k_s to batch_size)
-            rest_candidates = [i for i in remaining if i not in batch]
+            rest_candidates = list(remaining - batch_set)
             rng.shuffle(rest_candidates)
             batch.extend(rest_candidates[:self.batch_size - len(batch)])
+            batch_set.update(rest_candidates[:self.batch_size - len(batch)])
 
             # Remove used indices
-            used = set(batch)
-            remaining = [i for i in remaining if i not in used]
+            remaining -= batch_set
 
             yield batch
 
@@ -149,6 +171,11 @@ def comelsinger_collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor | List]:
         note_durations: List[Tensor] (ragged, not padded)
         note_pitches: List[Tensor] (ragged, not padded)
         phone_ids: List[Tensor] (ragged, not padded)
+
+    NOTE: acoustic_tokens is returned as (B, 12, T_max). Downstream modules
+    (SVTModule, CoMelSinger_S2A) expect (B, T, 12). Use
+    ``prepare_batch_for_svt(batch)`` or ``batch["acoustic_tokens"].permute(0, 2, 1)``
+    before passing to those modules.
     """
     # Find T_max
     T_max = max(item["acoustic_tokens"].shape[-1] for item in batch)
@@ -185,3 +212,15 @@ def comelsinger_collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor | List]:
         "note_pitches": note_pitches,  # List[Tensor]
         "phone_ids": phone_ids,  # List[Tensor]
     }
+
+
+def prepare_batch_for_svt(batch: Dict) -> Dict:
+    """Convert collate_fn output to SVTModule / CoMelSinger_S2A input format.
+
+    acoustic_tokens: (B, 12, T) -> (B, T, 12)
+
+    Returns a shallow copy of the batch dict with the transposed tensor.
+    """
+    batch = dict(batch)  # shallow copy
+    batch["acoustic_tokens"] = batch["acoustic_tokens"].permute(0, 2, 1)
+    return batch

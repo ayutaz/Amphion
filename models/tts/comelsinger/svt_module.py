@@ -8,7 +8,6 @@ import math
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -44,7 +43,7 @@ class SVTModule(nn.Module):
     - Pitch head: Linear(512, 129)
 
     Input: acoustic_tokens (B, L, 12) long
-    Output: {"logits": (B, L, 129), "probs": (B, L, 129)}
+    Output: {"logits": (B, L, 129)}
     """
 
     def __init__(
@@ -105,7 +104,6 @@ class SVTModule(nn.Module):
         Returns:
             dict with:
                 "logits": (B, L, 129) raw logits (pre-softmax)
-                "probs":  (B, L, 129) softmax probabilities
         """
         B, L, _ = acoustic_tokens.shape
 
@@ -128,9 +126,8 @@ class SVTModule(nn.Module):
 
         # Pitch prediction
         logits = self.pitch_head(x)  # (B, L, pitch_vocab_size)
-        probs = F.softmax(logits, dim=-1)
 
-        return {"logits": logits, "probs": probs}
+        return {"logits": logits}
 
     # M2-05: Freeze/unfreeze utilities
 

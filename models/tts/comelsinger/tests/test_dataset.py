@@ -10,6 +10,7 @@ from models.tts.comelsinger.dataset import (
     CoMelSingerDataset,
     BalancedSpeakerSampler,
     comelsinger_collate_fn,
+    prepare_batch_for_svt,
 )
 from torch.utils.data import DataLoader
 
@@ -384,3 +385,224 @@ class TestDataLoaderIntegration:
             assert batch["attention_mask"].shape == (B, T_max)
             assert batch["speaker_id"].shape == (B,)
             assert len(batch["note_durations"]) == B
+
+
+# ---------------------------------------------------------------------------
+# TestManifest
+# ---------------------------------------------------------------------------
+
+
+class TestManifest:
+    def test_manifest_created_on_first_load(self, tmp_path):
+        """First load creates manifest.json automatically."""
+        samples = [_make_sample(T=30, speaker_id=i % 2) for i in range(4)]
+        _write_samples(tmp_path, samples)
+        manifest_file = tmp_path / "manifest.json"
+        assert not manifest_file.exists()
+        ds = CoMelSingerDataset(tmp_path)
+        assert manifest_file.exists()
+        assert len(ds) == 4
+
+    def test_manifest_fast_path(self, tmp_path):
+        """Second load reads manifest.json without scanning .pt files."""
+        import json
+        samples = [_make_sample(T=30, speaker_id=i % 2) for i in range(4)]
+        _write_samples(tmp_path, samples)
+        # First load: creates manifest
+        ds1 = CoMelSingerDataset(tmp_path)
+        # Second load: uses manifest (fast path)
+        ds2 = CoMelSingerDataset(tmp_path)
+        assert len(ds2) == len(ds1)
+        assert ds2.speaker_ids == ds1.speaker_ids
+
+    def test_custom_manifest_path(self, tmp_path):
+        """Custom manifest_path creates manifest at the specified location."""
+        samples = [_make_sample(T=30, speaker_id=0) for _ in range(3)]
+        _write_samples(tmp_path, samples)
+        custom_path = tmp_path / "custom_manifest.json"
+        ds = CoMelSingerDataset(tmp_path, manifest_path=custom_path)
+        assert custom_path.exists()
+        assert len(ds) == 3
+
+
+# ---------------------------------------------------------------------------
+# TestPrepareBatchForSvt
+# ---------------------------------------------------------------------------
+
+
+class TestPrepareBatchForSvt:
+    def test_permute_shape(self):
+        """prepare_batch_for_svt transposes acoustic_tokens from (B,12,T) to (B,T,12)."""
+        items = [
+            {
+                "acoustic_tokens": torch.randint(0, 1024, (12, 30), dtype=torch.long),
+                "semantic_tokens": torch.randint(0, 1000, (30,), dtype=torch.long),
+                "pitch_tokens": torch.randint(0, 128, (30,), dtype=torch.long),
+                "attention_mask": torch.ones(30, dtype=torch.long),
+                "speaker_id": 0,
+                "note_durations": torch.tensor([10, 10, 10], dtype=torch.long),
+                "note_pitches": torch.tensor([60, 62, 64], dtype=torch.long),
+                "phone_ids": torch.tensor([1, 2, 3], dtype=torch.long),
+            }
+        ]
+        batch = comelsinger_collate_fn(items)
+        assert batch["acoustic_tokens"].shape == (1, 12, 30)
+        svt_batch = prepare_batch_for_svt(batch)
+        assert svt_batch["acoustic_tokens"].shape == (1, 30, 12)
+
+    def test_does_not_mutate_original(self):
+        """prepare_batch_for_svt returns a new dict, original is unchanged."""
+        items = [
+            {
+                "acoustic_tokens": torch.randint(0, 1024, (12, 20), dtype=torch.long),
+                "semantic_tokens": torch.randint(0, 1000, (20,), dtype=torch.long),
+                "pitch_tokens": torch.randint(0, 128, (20,), dtype=torch.long),
+                "attention_mask": torch.ones(20, dtype=torch.long),
+                "speaker_id": 0,
+                "note_durations": torch.tensor([10, 10], dtype=torch.long),
+                "note_pitches": torch.tensor([60, 62], dtype=torch.long),
+                "phone_ids": torch.tensor([1], dtype=torch.long),
+            }
+        ]
+        batch = comelsinger_collate_fn(items)
+        original_shape = batch["acoustic_tokens"].shape
+        _ = prepare_batch_for_svt(batch)
+        assert batch["acoustic_tokens"].shape == original_shape
+
+
+# ---------------------------------------------------------------------------
+# TestE2EPipeline (T1-T3)
+# ---------------------------------------------------------------------------
+
+
+class TestE2EPipeline:
+    """End-to-end tests: Dataset -> collate -> SVT/S2A."""
+
+    def test_collate_to_svt(self):
+        """collate output -> permute -> SVTModule.forward() produces valid logits."""
+        from models.tts.comelsinger.svt_module import SVTModule
+
+        B, T = 2, 40
+        items = [
+            {
+                "acoustic_tokens": torch.randint(0, 1024, (12, T), dtype=torch.long),
+                "semantic_tokens": torch.randint(0, 1000, (T,), dtype=torch.long),
+                "pitch_tokens": torch.randint(0, 128, (T,), dtype=torch.long),
+                "attention_mask": torch.ones(T, dtype=torch.long),
+                "speaker_id": i,
+                "note_durations": torch.tensor([T // 4] * 4, dtype=torch.long),
+                "note_pitches": torch.randint(40, 80, (4,), dtype=torch.long),
+                "phone_ids": torch.randint(0, 50, (5,), dtype=torch.long),
+            }
+            for i in range(B)
+        ]
+
+        batch = comelsinger_collate_fn(items)
+        svt_batch = prepare_batch_for_svt(batch)
+
+        model = SVTModule()
+        model.eval()
+        with torch.no_grad():
+            out = model(
+                svt_batch["acoustic_tokens"],
+                attention_mask=svt_batch["attention_mask"],
+            )
+
+        assert out["logits"].shape == (B, T, 129)
+        assert torch.isfinite(out["logits"]).all()
+
+    def test_collate_to_s2a(self):
+        """collate output -> permute -> CoMelSinger_S2A.forward() runs."""
+        from models.tts.comelsinger.comelsinger_s2a import CoMelSinger_S2A
+
+        B, T = 2, 50
+        items = [
+            {
+                "acoustic_tokens": torch.randint(0, 1024, (12, T), dtype=torch.long),
+                "semantic_tokens": torch.randint(0, 1000, (T,), dtype=torch.long),
+                "pitch_tokens": torch.randint(0, 128, (T,), dtype=torch.long),
+                "attention_mask": torch.ones(T, dtype=torch.long),
+                "speaker_id": i,
+                "note_durations": torch.tensor([T // 5] * 5, dtype=torch.long),
+                "note_pitches": torch.randint(40, 80, (5,), dtype=torch.long),
+                "phone_ids": torch.randint(0, 50, (5,), dtype=torch.long),
+            }
+            for i in range(B)
+        ]
+
+        batch = comelsinger_collate_fn(items)
+        svt_batch = prepare_batch_for_svt(batch)
+
+        model = CoMelSinger_S2A()
+        result = model(
+            x0=svt_batch["acoustic_tokens"],
+            x_mask=svt_batch["attention_mask"],
+            cond_code=batch["semantic_tokens"],
+            pitch_tokens=batch["pitch_tokens"],
+        )
+        # forward returns tuple of 6 elements
+        assert len(result) == 6
+        logits = result[0]
+        assert torch.isfinite(logits).all()
+
+    def test_svt_frozen_with_s2a(self):
+        """S2A forward + frozen SVT -> compute_total_loss end-to-end."""
+        from models.tts.comelsinger.svt_module import SVTModule
+        from models.tts.comelsinger.losses import compute_svt_loss, compute_total_loss
+
+        B, T = 2, 40
+        items = [
+            {
+                "acoustic_tokens": torch.randint(0, 1024, (12, T), dtype=torch.long),
+                "semantic_tokens": torch.randint(0, 1000, (T,), dtype=torch.long),
+                "pitch_tokens": torch.randint(0, 128, (T,), dtype=torch.long),
+                "attention_mask": torch.ones(T, dtype=torch.long),
+                "speaker_id": i,
+                "note_durations": torch.tensor([T // 4] * 4, dtype=torch.long),
+                "note_pitches": torch.randint(40, 80, (4,), dtype=torch.long),
+                "phone_ids": torch.randint(0, 50, (5,), dtype=torch.long),
+            }
+            for i in range(B)
+        ]
+
+        batch = comelsinger_collate_fn(items)
+        svt_batch = prepare_batch_for_svt(batch)
+
+        # Frozen SVT
+        svt = SVTModule()
+        svt.freeze()
+        with torch.no_grad():
+            svt_out = svt(
+                svt_batch["acoustic_tokens"],
+                attention_mask=svt_batch["attention_mask"],
+            )
+
+        # Build frame alignment / pitch note labels from batch
+        frame_alignment = [d.tolist() for d in batch["note_durations"]]
+        pitch_note_labels = [p.tolist() for p in batch["note_pitches"]]
+
+        svt_loss, svt_parts = compute_svt_loss(
+            pitch_logits=svt_out["logits"],
+            target_pitch_tokens=batch["pitch_tokens"],
+            frame_alignment=frame_alignment,
+            pitch_note_labels=pitch_note_labels,
+            attention_mask=batch["attention_mask"],
+        )
+
+        # Dummy losses for SCL, FCL, mask (would come from S2A in real pipeline)
+        l_scl = torch.tensor(0.5, requires_grad=True)
+        l_fcl = torch.tensor(0.3, requires_grad=True)
+        l_mask = torch.tensor(1.0, requires_grad=True)
+
+        total, parts = compute_total_loss(l_scl, l_fcl, svt_loss.detach(), l_mask)
+        assert torch.isfinite(total)
+        total.backward()
+
+        # SVT params should still have no grad
+        for name, p in svt.named_parameters():
+            assert p.grad is None, f"Frozen SVT param {name} received grad"
+
+        # Dummy losses should have grads
+        assert l_scl.grad is not None
+        assert l_fcl.grad is not None
+        assert l_mask.grad is not None

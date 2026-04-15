@@ -184,7 +184,9 @@ def compute_svt_loss(
         dur_losses = []
         for b, ts, te, mp, ad in spans:
             prob_sum = pitch_probs[b, ts:te, mp].sum()
-            dur_losses.append((prob_sum - ad) ** 2)
+            # Clamp individual note losses to prevent gradient explosion in early training
+            dur_loss_per_note = (prob_sum - ad) ** 2
+            dur_losses.append(dur_loss_per_note.clamp(max=100.0))
         l_dur = torch.stack(dur_losses).mean()
 
     total = l_ce + lambda_seg * l_seg + lambda_dur * l_dur
