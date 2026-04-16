@@ -117,10 +117,22 @@ L_mask = MaskLoss(â, a)                    (MaskGCTのマスク予測損失)
 - [x] 要求定義書作成（11_requirements_definition.md, 810行）
 - [x] 要件定義書作成（12_requirements_specification.md, 923行）
 - [x] マイルストーン計画書作成（13_milestones.md, M0〜M4, 81タスク）
-- [ ] ピッチトークナイザー実装
-- [ ] SVTモジュール実装
-- [ ] S2A拡張（ピッチ埋め込み + 対照学習）
-- [ ] 学習パイプライン
-- [ ] 推論パイプライン
-- [ ] データ前処理パイプライン
-- [ ] 評価スクリプト
+- [x] チケット作成（81チケット、レビュー・修正済み）
+- [x] M0: 環境構築（uv init, 依存, モデルDL, espeak-ng, smoke test）
+- [x] M1: ピッチトークナイザー実装（pitch_tokenizer.py, 57テスト）
+- [x] M1: 損失関数実装（losses.py, 24テスト）
+- [x] M1: データ前処理パイプライン（preprocess.py, 31テスト）
+- [x] M2: SVTモジュール実装（svt_module.py, 34テスト）
+- [x] M2: Dataset/DataLoader（dataset.py, 31テスト）
+- [x] M2: S2A拡張（comelsinger_s2a.py, 11テスト）
+- [x] M3: SVT学習スクリプト（train_svt.py, 27テスト）
+- [x] M3: S2A学習スクリプト — Algorithm 1（train_s2a.py 901行, 46テスト）
+- [x] M4: 推論パイプライン（comelsinger_inference.py, 24テスト）
+- [x] M4: 評価スクリプト群（eval/ 9ファイル, 36テスト）
+- [x] 全320テストパス（3 skip: 実モデル依存）
+- [ ] データセット準備（M4Singer/Opencpopダウンロード+前処理実行）
+- [ ] SVT学習実行（50Kステップ, GPU×1）
+- [ ] S2A LoRA fine-tuning実行（100エポック, GPU×4）
+- [ ] 推論実行（from_pretrained完成+Seen/Unseen 50発話生成）
+- [ ] 評価実行（MCD/F0-RMSE/SECS/SingMOS/SVT-F1）
+- [ ] Ablation Study（6条件の学習・評価）
