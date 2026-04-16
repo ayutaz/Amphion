@@ -15,7 +15,8 @@ import math
 from pathlib import Path
 
 import numpy as np
-import soundfile as sf
+
+from models.tts.comelsinger.eval._utils import load_wav, match_wav_pairs
 
 logger = logging.getLogger(__name__)
 
@@ -99,25 +100,15 @@ def evaluate_f0_rmse(
     Returns:
         dict with keys: "mean_f0_rmse", "std_f0_rmse", "n_samples", "per_file".
     """
-    ref_dir = Path(ref_dir)
-    syn_dir = Path(syn_dir)
-
-    ref_files = {p.stem: p for p in sorted(ref_dir.glob("*.wav"))}
-    syn_files = {p.stem: p for p in sorted(syn_dir.glob("*.wav"))}
-    common = sorted(set(ref_files.keys()) & set(syn_files.keys()))
-
-    if not common:
-        raise FileNotFoundError(
-            f"No matching WAV files found between {ref_dir} and {syn_dir}"
-        )
+    pairs = match_wav_pairs(ref_dir, syn_dir)
 
     per_file = []
-    for stem in common:
-        ref_wav, _ = sf.read(str(ref_files[stem]), dtype="float32")
-        syn_wav, _ = sf.read(str(syn_files[stem]), dtype="float32")
+    for ref_path, syn_path in pairs:
+        ref_wav = load_wav(ref_path, sr=sr)
+        syn_wav = load_wav(syn_path, sr=sr)
         rmse = compute_f0_rmse(ref_wav, syn_wav, sr=sr)
-        per_file.append({"filename": stem, "f0_rmse": rmse})
-        logger.info("  %s: F0-RMSE = %.6f", stem, rmse)
+        per_file.append({"filename": ref_path.stem, "f0_rmse": rmse})
+        logger.info("  %s: F0-RMSE = %.6f", ref_path.stem, rmse)
 
     # Exclude NaN entries from aggregation
     valid_scores = [r["f0_rmse"] for r in per_file if not math.isnan(r["f0_rmse"])]

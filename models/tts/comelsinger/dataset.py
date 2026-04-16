@@ -119,8 +119,12 @@ class BalancedSpeakerSampler(Sampler):
         if not self.eligible_speakers:
             raise ValueError("No speaker has >= 2 samples for SCL pairs")
 
+    def set_epoch(self, epoch: int) -> None:
+        """Update seed for epoch-based shuffling (DDP compatible)."""
+        self.epoch = epoch
+
     def __iter__(self):
-        rng = random.Random(self.seed)
+        rng = random.Random(self.seed + getattr(self, "epoch", 0))
         all_indices = list(range(len(self.speaker_ids)))
         rng.shuffle(all_indices)
 

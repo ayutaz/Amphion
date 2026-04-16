@@ -23,10 +23,10 @@ from typing import Any, Dict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import yaml
 
 from models.tts.comelsinger.train_utils import (
     check_loss_finite,
+    load_config,
     unwrap_model,
 )
 
@@ -199,11 +199,6 @@ def inverse_sqrt_schedule(step: int, warmup_steps: int = 1000) -> float:
 
 # ===== M3-08: Model & optimizer construction ================================
 
-def load_config(config_path: str) -> dict:
-    """Load YAML config file."""
-    with open(config_path) as f:
-        return yaml.safe_load(f)
-
 
 def build_s2a_model(cfg: dict, device: torch.device):
     """Build CoMelSinger_S2A and optionally load pretrained MaskGCT-S2A weights.
@@ -274,9 +269,11 @@ def build_svt_model(cfg: dict, device: torch.device):
     svt_ckpt_path = cfg.get("checkpoint", {}).get("svt_checkpoint")
     if svt_ckpt_path and os.path.exists(svt_ckpt_path):
         logger.info("Loading SVT checkpoint from %s", svt_ckpt_path)
-        svt.load_state_dict(
-            torch.load(svt_ckpt_path, map_location="cpu", weights_only=True)
-        )
+        ckpt = torch.load(svt_ckpt_path, map_location="cpu", weights_only=True)
+        if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+            svt.load_state_dict(ckpt["model_state_dict"])
+        else:
+            svt.load_state_dict(ckpt)
     else:
         logger.info("No SVT checkpoint found; using randomly initialized SVT.")
 

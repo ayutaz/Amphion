@@ -33,13 +33,13 @@ CoMelSinger の再現実装プロジェクト。Amphion フレームワーク（
                 ▼
 ┌─────────────────────────────────────┐
 │  EnCodec Decoder（事前学習済み）      │
-│  音響トークン(RVQ 8層) → 波形         │
+│  音響トークン(RVQ 12層) → 波形         │
 └─────────────────────────────────────┘
 ```
 
 ### MaskGCT ベースコード（既存・変更最小限）
 
-- `models/tts/maskgct/maskgct_s2a.py` — MaskGCT_S2A クラス: DiffLlama backbone, RVQ 8層マスク予測, forward_diffusion/loss_t メソッド
+- `models/tts/maskgct/maskgct_s2a.py` — MaskGCT_S2A クラス: DiffLlama backbone, RVQ 12層マスク予測, forward_diffusion/loss_t メソッド
 - `models/tts/maskgct/maskgct_t2s.py` — MaskGCT_T2S クラス: DiffLlamaPrefix backbone, セマンティックトークン生成
 - `models/tts/maskgct/llama_nar.py` — DiffLlama/DiffLlamaPrefix: LlamaDecoderLayer + LlamaAdaptiveRMSNorm, SinusoidalPosEmb
 - `models/tts/maskgct/maskgct_utils.py` — Codec/semantic extraction utilities
@@ -96,7 +96,7 @@ L_mask = MaskLoss(â, a)                    (MaskGCTのマスク予測損失)
 ## Tech Stack
 
 - Python (PyTorch 2.1+), transformers (LlamaConfig/LlamaModel)
-- Audio codec: EnCodec (`facebook/encodec_24khz`, 8 RVQ codebooks, 24kHz)
+- Audio codec: EnCodec (`facebook/encodec_24khz`, 12 RVQ codebooks, 24kHz)
 - Fine-tuning: LoRA via HuggingFace PEFT (`r=16, alpha=32, target=q_proj,v_proj`)
 - Semantic features: Whisper encoder / wav2vec 2.0
 - Pitch extraction: pyworld/crepe → F0 → discrete pitch tokens

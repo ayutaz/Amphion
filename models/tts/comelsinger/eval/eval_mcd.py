@@ -15,7 +15,8 @@ from pathlib import Path
 
 import librosa
 import numpy as np
-import soundfile as sf
+
+from models.tts.comelsinger.eval._utils import load_wav, match_wav_pairs
 
 logger = logging.getLogger(__name__)
 
@@ -86,25 +87,15 @@ def evaluate_mcd(
     Returns:
         dict with keys: "mean_mcd", "std_mcd", "n_samples", "per_file".
     """
-    ref_dir = Path(ref_dir)
-    syn_dir = Path(syn_dir)
-
-    ref_files = {p.stem: p for p in sorted(ref_dir.glob("*.wav"))}
-    syn_files = {p.stem: p for p in sorted(syn_dir.glob("*.wav"))}
-    common = sorted(set(ref_files.keys()) & set(syn_files.keys()))
-
-    if not common:
-        raise FileNotFoundError(
-            f"No matching WAV files found between {ref_dir} and {syn_dir}"
-        )
+    pairs = match_wav_pairs(ref_dir, syn_dir)
 
     per_file = []
-    for stem in common:
-        ref_wav, _ = sf.read(str(ref_files[stem]), dtype="float32")
-        syn_wav, _ = sf.read(str(syn_files[stem]), dtype="float32")
+    for ref_path, syn_path in pairs:
+        ref_wav = load_wav(ref_path, sr=sr)
+        syn_wav = load_wav(syn_path, sr=sr)
         mcd = compute_mcd(ref_wav, syn_wav, sr=sr)
-        per_file.append({"filename": stem, "mcd": mcd})
-        logger.info("  %s: MCD = %.4f dB", stem, mcd)
+        per_file.append({"filename": ref_path.stem, "mcd": mcd})
+        logger.info("  %s: MCD = %.4f dB", ref_path.stem, mcd)
 
     scores = [r["mcd"] for r in per_file]
     return {

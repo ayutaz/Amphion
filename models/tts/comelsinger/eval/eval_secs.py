@@ -14,7 +14,8 @@ import logging
 from pathlib import Path
 
 import numpy as np
-import soundfile as sf
+
+from models.tts.comelsinger.eval._utils import load_wav, match_wav_pairs
 
 logger = logging.getLogger(__name__)
 
@@ -130,17 +131,7 @@ def evaluate_secs(
     Returns:
         dict with keys: "mean_secs", "std_secs", "n_samples", "per_file".
     """
-    ref_dir = Path(ref_dir)
-    syn_dir = Path(syn_dir)
-
-    ref_files = {p.stem: p for p in sorted(ref_dir.glob("*.wav"))}
-    syn_files = {p.stem: p for p in sorted(syn_dir.glob("*.wav"))}
-    common = sorted(set(ref_files.keys()) & set(syn_files.keys()))
-
-    if not common:
-        raise FileNotFoundError(
-            f"No matching WAV files found between {ref_dir} and {syn_dir}"
-        )
+    pairs = match_wav_pairs(ref_dir, syn_dir)
 
     # Pre-load model once
     try:
@@ -155,16 +146,16 @@ def evaluate_secs(
         }
 
     per_file = []
-    for stem in common:
-        ref_wav, _ = sf.read(str(ref_files[stem]), dtype="float32")
-        syn_wav, _ = sf.read(str(syn_files[stem]), dtype="float32")
+    for ref_path, syn_path in pairs:
+        ref_wav = load_wav(ref_path, sr=sr)
+        syn_wav = load_wav(syn_path, sr=sr)
         score = compute_secs(
             ref_wav, syn_wav, sr=sr,
             feature_extractor=feature_extractor, model=model, device=device,
         )
-        per_file.append({"filename": stem, "secs": score})
+        per_file.append({"filename": ref_path.stem, "secs": score})
         if score is not None:
-            logger.info("  %s: SECS = %.4f", stem, score)
+            logger.info("  %s: SECS = %.4f", ref_path.stem, score)
 
     valid_scores = [r["secs"] for r in per_file if r["secs"] is not None]
 
