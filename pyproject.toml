@@ -6,17 +6,33 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "accelerate>=0.30.0",
+    "cn2an>=0.5.23",
     "einops>=0.8.2",
+    "g2p-en>=2.1.0",
+    "huggingface-hub>=0.36.2",
+    "jieba>=0.42.1",
+    "json5>=0.14.0",
+    "langsegment>=0.2.0",
     "librosa>=0.11.0",
+    "num2words>=0.5.14",
     "numpy>=2.4.4",
+    "onnxruntime>=1.24.4",
     "peft>=0.11.0",
+    "phonemizer>=3.3.0",
+    "pykakasi>=2.3.0",
+    "pyopenjtalk>=0.4.1",
     "pypinyin>=0.55.0",
     "pyworld>=0.3.5",
     "pyyaml>=6.0",
+    "ruamel-yaml>=0.19.1",
     "scikit-learn>=1.8.0",
+    "six>=1.17.0",
     "soundfile>=0.13.1",
     "torch>=2.11.0",
+    "torchaudio>=2.11.0",
+    "tqdm>=4.67.3",
     "transformers>=4.40.0,<5.0.0",
+    "unidecode>=1.4.0",
 ]
 
 [dependency-groups]
