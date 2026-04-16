@@ -163,14 +163,11 @@ class TestLoadLoraWeights:
         """load_lora_weights does nothing if s2a models are None."""
         pipeline = CoMelSingerInferencePipeline()
         # Should not raise even though models are None
-        with patch("models.tts.comelsinger.comelsinger_inference.PeftModel") as mock_peft:
-            # This will actually fail at import, but we mock it
-            pass
-        # Direct test: if model is None, PeftModel should never be called
+        # Direct test: if model is None, load_lora_weights should not attempt PeftModel import
         pipeline.s2a_model_1layer = None
         pipeline.s2a_model_full = None
-        # We can't actually call load_lora_weights without peft installed,
-        # but we can verify the guard logic
+        # load_lora_weights with both models None should be a no-op
+        pipeline.load_lora_weights("/dummy/path", model_type="both")
         assert pipeline.s2a_model_1layer is None
         assert pipeline.s2a_model_full is None
 

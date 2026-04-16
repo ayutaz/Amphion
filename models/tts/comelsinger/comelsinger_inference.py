@@ -466,11 +466,18 @@ class CoMelSingerInferencePipeline:
                 f"model_type must be '1layer', 'full', or 'both', got '{model_type}'"
             )
 
-        from peft import PeftModel
-
         lora_path = Path(lora_path)
 
-        if model_type in ("1layer", "both") and self.s2a_model_1layer is not None:
+        # Early return if no models need loading
+        needs_1layer = model_type in ("1layer", "both") and self.s2a_model_1layer is not None
+        needs_full = model_type in ("full", "both") and self.s2a_model_full is not None
+        if not needs_1layer and not needs_full:
+            logger.info("No S2A models to load LoRA weights for (models are None)")
+            return
+
+        from peft import PeftModel
+
+        if needs_1layer:
             adapter_path = lora_path / "s2a_1layer"
             logger.info("Loading LoRA weights for s2a_1layer from %s", adapter_path)
             self.s2a_model_1layer = PeftModel.from_pretrained(
@@ -478,7 +485,7 @@ class CoMelSingerInferencePipeline:
                 str(adapter_path),
             )
 
-        if model_type in ("full", "both") and self.s2a_model_full is not None:
+        if needs_full:
             adapter_path = lora_path / "s2a_full"
             logger.info("Loading LoRA weights for s2a_full from %s", adapter_path)
             self.s2a_model_full = PeftModel.from_pretrained(
