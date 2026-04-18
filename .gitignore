@@ -48,6 +48,13 @@ ckpts
 *.ckpt
 *.wav
 *.flac
+*.safetensors
+
+# Downloaded pretrained models
+models/tts/maskgct/ckpt/amphion_maskgct/
+
+# Claude Code
+.claude/
 pretrained/wenet/*conformer_exp
 pretrained/bigvgan/args.json
 !egs/tts/VALLE/prompt_examples/*.wav
