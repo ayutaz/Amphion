@@ -101,27 +101,95 @@ def parse_args() -> argparse.Namespace:
 
 
 # ---------------------------------------------------------------------------
-# Model loading (TODO: replace stubs with real model loading)
+# Model loading
 # ---------------------------------------------------------------------------
 
-def load_models(device: torch.device):
+def load_models(device: torch.device, cfg: dict | None = None):
     """Load all pretrained models required for preprocessing.
 
-    TODO: Implement actual model loading:
-        - Amphion CodecEncoder / CodecDecoder   (amphion/MaskGCT-S2A)
-        - Wav2Vec2BertModel + feature extractor (facebook/w2v-bert-2.0)
-        - RepCodec semantic quantizer           (trained on w2v-bert features)
-        - semantic_mean / semantic_std           (precomputed normalization stats)
+    Loads Amphion CodecEncoder/Decoder, w2v-bert-2.0, RepCodec semantic
+    quantizer, normalization stats, and a PitchTokenizer.
+
+    Args:
+        device: Computation device.
+        cfg: Optional dict with custom checkpoint paths. Supported keys:
+            - codec_encoder_ckpt: path to acoustic codec encoder safetensors
+            - codec_decoder_ckpt: path to acoustic codec decoder safetensors
+            - semantic_codec_ckpt: path to semantic codec safetensors
+            - w2v_bert_model: HuggingFace model ID or local path
+            - w2v_stats: path to wav2vec2bert_stats.pt
 
     Returns:
         dict with keys: codec_encoder, codec_decoder,
                         w2v_bert_model, semantic_codec,
-                        semantic_mean, semantic_std
+                        semantic_mean, semantic_std, pitch_tokenizer
     """
-    raise NotImplementedError(
-        "Real model loading is not yet implemented. "
-        "Download pretrained checkpoints and replace this stub."
+    import safetensors.torch
+    from safetensors import safe_open
+
+    from models.tts.comelsinger.pitch_tokenizer import PitchTokenizer
+    from models.tts.maskgct.maskgct_utils import build_acoustic_codec, build_semantic_codec
+    from transformers import Wav2Vec2BertModel
+    from utils.util import load_config
+
+    if cfg is None:
+        cfg = {}
+
+    maskgct_cfg = load_config("./models/tts/maskgct/config/maskgct.json")
+
+    # Acoustic codec (encoder + decoder)
+    codec_enc, codec_dec = build_acoustic_codec(
+        maskgct_cfg.model.acoustic_codec, device
     )
+    safetensors.torch.load_model(
+        codec_enc,
+        cfg.get(
+            "codec_encoder_ckpt",
+            "models/tts/maskgct/ckpt/amphion_maskgct/acoustic_codec/model.safetensors",
+        ),
+    )
+    # CodecDecoder: shared tensor workaround via safe_open
+    dec_weights: dict = {}
+    dec_path = cfg.get(
+        "codec_decoder_ckpt",
+        "models/tts/maskgct/ckpt/amphion_maskgct/acoustic_codec/model_1.safetensors",
+    )
+    with safe_open(dec_path, framework="pt") as f:
+        for k in f.keys():
+            dec_weights[k] = f.get_tensor(k)
+    codec_dec.load_state_dict(dec_weights, strict=False)
+
+    # Semantic model (w2v-bert-2.0)
+    w2v_model_id = cfg.get("w2v_bert_model", "facebook/w2v-bert-2.0")
+    semantic_model = Wav2Vec2BertModel.from_pretrained(w2v_model_id)
+    semantic_model.to(device).eval()
+
+    # Semantic codec (RepCodec)
+    semantic_codec = build_semantic_codec(maskgct_cfg.model.semantic_codec, device)
+    safetensors.torch.load_model(
+        semantic_codec,
+        cfg.get(
+            "semantic_codec_ckpt",
+            "models/tts/maskgct/ckpt/amphion_maskgct/semantic_codec/model.safetensors",
+        ),
+    )
+
+    # Normalization stats
+    stats = torch.load(
+        cfg.get("w2v_stats", "models/tts/maskgct/ckpt/wav2vec2bert_stats.pt"),
+        map_location="cpu",
+        weights_only=True,
+    )
+
+    return {
+        "codec_encoder": codec_enc.to(device).eval(),
+        "codec_decoder": codec_dec.to(device).eval(),
+        "w2v_bert_model": semantic_model,
+        "semantic_codec": semantic_codec.to(device).eval(),
+        "semantic_mean": stats["mean"].to(device),
+        "semantic_std": stats["var"].sqrt().to(device),
+        "pitch_tokenizer": PitchTokenizer(),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -296,13 +364,10 @@ def main() -> None:
                 entries.append(json.loads(line))
     logger.info("Loaded %d entries from %s", len(entries), manifest_path)
 
-    # TODO: Uncomment when real models are available
-    # logger.info("Loading models onto %s ...", device)
-    # models = load_models(device)
-    # logger.warning("Model loading not implemented; aborting preprocessing.")
-    # sys.exit(1)
+    logger.info("Loading models onto %s ...", device)
+    models = load_models(device)
 
-    pitch_tokenizer = load_pitch_tokenizer()
+    pitch_tokenizer = models.get("pitch_tokenizer") or load_pitch_tokenizer()
     phone2id = load_phone2id(args.phone_vocab)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -321,24 +386,19 @@ def main() -> None:
     for entry in iterator:
         sample_id = entry.get("id", "<unknown>")
         try:
-            # TODO: Replace with actual model dict once models are loaded
-            raise NotImplementedError(
-                "Real model extraction not available yet. "
-                "Implement load_models() and pass the result here."
+            meta = process_one(
+                entry=entry,
+                data_dir=args.data_dir,
+                output_dir=args.output_dir,
+                models=models,
+                pitch_tokenizer=pitch_tokenizer,
+                phone2id=phone2id,
+                device=device,
+                sr_acoustic=args.sr_acoustic,
+                sr_semantic=args.sr_semantic,
             )
-            # meta = process_one(
-            #     entry=entry,
-            #     data_dir=args.data_dir,
-            #     output_dir=args.output_dir,
-            #     models=models,
-            #     pitch_tokenizer=pitch_tokenizer,
-            #     phone2id=phone2id,
-            #     device=device,
-            #     sr_acoustic=args.sr_acoustic,
-            #     sr_semantic=args.sr_semantic,
-            # )
-            # metadata.append(meta)
-            # n_ok += 1
+            metadata.append(meta)
+            n_ok += 1
         except Exception as exc:  # noqa: BLE001
             logger.warning("Skipping %s: %s", sample_id, exc)
             n_skip += 1

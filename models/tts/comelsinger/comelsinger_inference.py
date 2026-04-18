@@ -408,11 +408,11 @@ class CoMelSingerInferencePipeline:
     @classmethod
     def from_pretrained(
         cls,
-        config_path: str | Path,
+        ckpt_dir: str | Path,
         lora_path: Optional[str | Path] = None,
         device: str = "cpu",
     ) -> "CoMelSingerInferencePipeline":
-        """Load all models from config and pretrained checkpoints.
+        """Load all models from pretrained checkpoints.
 
         Loads:
         - Semantic model (w2v-bert-2.0) + normalization stats
@@ -423,21 +423,156 @@ class CoMelSingerInferencePipeline:
         - PitchTokenizer
 
         Args:
-            config_path: Path to inference config JSON/YAML.
+            ckpt_dir: Directory containing amphion_maskgct/ subfolder
+                      (e.g., 'models/tts/maskgct/ckpt').
             lora_path: Optional path to LoRA adapter weights directory.
-            device: Computation device string.
+            device: Computation device string ("cpu", "cuda", "mps").
 
         Returns:
             Initialized pipeline with all models loaded.
-
-        Raises:
-            NotImplementedError: Until pretrained model downloads are set up (M0).
         """
-        raise NotImplementedError(
-            "from_pretrained requires pretrained model downloads (M0). "
-            "See models/tts/maskgct/maskgct_inference.py for the MaskGCT "
-            "model loading pattern."
+        import safetensors.torch
+        from safetensors import safe_open
+
+        from models.tts.comelsinger.comelsinger_s2a import CoMelSinger_S2A
+        from models.tts.comelsinger.pitch_tokenizer import PitchTokenizer
+        from models.tts.maskgct.maskgct_t2s import MaskGCT_T2S
+        from models.tts.maskgct.maskgct_utils import (
+            build_acoustic_codec,
+            build_semantic_codec,
         )
+        from transformers import Wav2Vec2BertModel
+        from utils.util import load_config
+
+        ckpt_dir = Path(ckpt_dir)
+        amphion_dir = ckpt_dir / "amphion_maskgct"
+        cfg_path = ckpt_dir.parent / "config" / "maskgct.json"
+
+        # 1. Load MaskGCT config
+        cfg = load_config(str(cfg_path))
+
+        # 2. Build and load acoustic codec (encoder + decoder)
+        codec_encoder, codec_decoder = build_acoustic_codec(
+            cfg.model.acoustic_codec, device
+        )
+        safetensors.torch.load_model(
+            codec_encoder,
+            str(amphion_dir / "acoustic_codec" / "model.safetensors"),
+        )
+        # CodecDecoder: shared tensor workaround via safe_open
+        dec_weights: dict = {}
+        with safe_open(
+            str(amphion_dir / "acoustic_codec" / "model_1.safetensors"),
+            framework="pt",
+        ) as f:
+            for k in f.keys():
+                dec_weights[k] = f.get_tensor(k)
+        codec_decoder.load_state_dict(dec_weights, strict=False)
+
+        # 3. Build and load semantic codec (RepCodec)
+        semantic_codec = build_semantic_codec(cfg.model.semantic_codec, device)
+        safetensors.torch.load_model(
+            semantic_codec,
+            str(amphion_dir / "semantic_codec" / "model.safetensors"),
+        )
+
+        # 4. Build and load T2S model
+        t2s_model = MaskGCT_T2S(
+            hidden_size=1536,
+            num_layers=16,
+            num_heads=16,
+            cfg_scale=0.15,
+            cond_codebook_size=8192,
+            cond_dim=1024,
+        )
+        skip_keys = {"diff_estimator.embed_tokens.weight"}
+        t2s_weights: dict = {}
+        with safe_open(
+            str(amphion_dir / "t2s_model" / "model.safetensors"),
+            framework="pt",
+        ) as f:
+            for k in f.keys():
+                if k not in skip_keys:
+                    t2s_weights[k] = f.get_tensor(k)
+        t2s_model.load_state_dict(t2s_weights, strict=False)
+
+        # 5. Build and load S2A models as CoMelSinger_S2A (1-layer + full)
+        s2a_kwargs = dict(
+            cond_codebook_size=8192,
+            cond_dim=1024,
+            hidden_size=1024,
+            num_layers=16,
+            num_heads=16,
+            codebook_size=1024,
+            cfg_scale=0.15,
+        )
+
+        s2a_1layer = CoMelSinger_S2A(
+            num_quantizer=1, predict_layer_1=True, **s2a_kwargs
+        )
+        s2a_weights_1l: dict = {}
+        with safe_open(
+            str(amphion_dir / "s2a_model" / "s2a_model_1layer" / "model.safetensors"),
+            framework="pt",
+        ) as f:
+            for k in f.keys():
+                if k not in skip_keys:
+                    s2a_weights_1l[k] = f.get_tensor(k)
+        s2a_1layer.load_state_dict(s2a_weights_1l, strict=False)
+
+        s2a_full = CoMelSinger_S2A(
+            num_quantizer=12, predict_layer_1=False, **s2a_kwargs
+        )
+        s2a_weights_full: dict = {}
+        with safe_open(
+            str(amphion_dir / "s2a_model" / "s2a_model_full" / "model.safetensors"),
+            framework="pt",
+        ) as f:
+            for k in f.keys():
+                if k not in skip_keys:
+                    s2a_weights_full[k] = f.get_tensor(k)
+        s2a_full.load_state_dict(s2a_weights_full, strict=False)
+
+        # 6. Load w2v-bert-2.0 semantic model
+        semantic_model = Wav2Vec2BertModel.from_pretrained("facebook/w2v-bert-2.0")
+
+        # 7. Load normalization stats
+        stats = torch.load(
+            str(ckpt_dir / "wav2vec2bert_stats.pt"),
+            map_location="cpu",
+            weights_only=True,
+        )
+
+        # 8. Move all models to device and set eval mode
+        dev = torch.device(device)
+        codec_encoder.to(dev).eval()
+        codec_decoder.to(dev).eval()
+        semantic_codec.to(dev).eval()
+        t2s_model.to(dev).eval()
+        s2a_1layer.to(dev).eval()
+        s2a_full.to(dev).eval()
+        semantic_model.to(dev).eval()
+
+        # 9. Build pipeline instance
+        pipeline = cls(
+            pitch_tokenizer=PitchTokenizer(),
+            s2a_model_1layer=s2a_1layer,
+            s2a_model_full=s2a_full,
+            t2s_model=t2s_model,
+            codec_encoder=codec_encoder,
+            codec_decoder=codec_decoder,
+            semantic_model=semantic_model,
+            semantic_codec=semantic_codec,
+            semantic_mean=stats["mean"].to(dev),
+            semantic_std=stats["var"].sqrt().to(dev),
+            device=device,
+        )
+
+        # 10. Optionally load LoRA weights
+        if lora_path is not None:
+            pipeline.load_lora_weights(Path(lora_path))
+
+        return pipeline
 
     def load_lora_weights(
         self,

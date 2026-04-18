@@ -11,12 +11,91 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+import safetensors
+import safetensors.torch
 import torch
 
 from models.tts.comelsinger.comelsinger_inference import (
     CoMelSingerInferencePipeline,
 )
 from models.tts.comelsinger.pitch_tokenizer import PitchTokenizer
+
+
+def _make_from_pretrained_mocks():
+    """Build a dict of mock objects suitable for patching from_pretrained imports.
+
+    Returns dict mapping patch target -> mock, plus a helper to apply them.
+    Since maskgct_utils imports g2p which requires espeak, we must prevent
+    its import by mocking the entire import chain at the function level.
+    """
+    mock_load_config = MagicMock(return_value=MagicMock())
+    mock_build_acoustic = MagicMock(return_value=(MagicMock(), MagicMock()))
+    mock_build_semantic = MagicMock(return_value=MagicMock())
+
+    mock_ctx = MagicMock()
+    mock_ctx.__enter__ = MagicMock(return_value=mock_ctx)
+    mock_ctx.__exit__ = MagicMock(return_value=False)
+    mock_ctx.keys.return_value = ["some.weight"]
+    mock_ctx.get_tensor.return_value = torch.zeros(1)
+
+    mock_safe_open = MagicMock(return_value=mock_ctx)
+    mock_load_model = MagicMock()
+    mock_torch_load = MagicMock(return_value={
+        "mean": torch.zeros(1024),
+        "var": torch.ones(1024),
+    })
+
+    mock_t2s_cls = MagicMock(return_value=MagicMock())
+    mock_s2a_cls = MagicMock(return_value=MagicMock())
+
+    mock_w2v_bert_cls = MagicMock()
+    mock_w2v_bert_cls.from_pretrained.return_value = MagicMock()
+
+    # Build a fake maskgct_utils module to inject into sys.modules
+    mock_maskgct_utils = MagicMock()
+    mock_maskgct_utils.build_acoustic_codec = mock_build_acoustic
+    mock_maskgct_utils.build_semantic_codec = mock_build_semantic
+
+    # Build a fake utils.util module
+    mock_utils_util = MagicMock()
+    mock_utils_util.load_config = mock_load_config
+
+    # Build fake safetensors modules (PyO3 can only init once per process)
+    mock_safetensors = MagicMock()
+    mock_safetensors.safe_open = mock_safe_open
+    mock_safetensors_torch = MagicMock()
+    mock_safetensors_torch.load_model = mock_load_model
+    mock_safetensors.torch = mock_safetensors_torch
+
+    return {
+        "load_config": mock_load_config,
+        "build_acoustic": mock_build_acoustic,
+        "build_semantic": mock_build_semantic,
+        "safe_open": mock_safe_open,
+        "safe_ctx": mock_ctx,
+        "load_model": mock_load_model,
+        "torch_load": mock_torch_load,
+        "t2s_cls": mock_t2s_cls,
+        "s2a_cls": mock_s2a_cls,
+        "w2v_bert_cls": mock_w2v_bert_cls,
+        "maskgct_utils_mod": mock_maskgct_utils,
+        "utils_util_mod": mock_utils_util,
+        "safetensors_mod": mock_safetensors,
+        "safetensors_torch_mod": mock_safetensors_torch,
+    }
+
+
+def _sys_modules_dict(m):
+    """Return a dict suitable for patch.dict('sys.modules', ...).
+
+    Only mock modules whose import chain triggers unavailable system tools
+    (espeak via g2p). maskgct_utils imports g2p_generation which needs espeak.
+    """
+    return {
+        "models.tts.maskgct.maskgct_utils": m["maskgct_utils_mod"],
+        "models.tts.maskgct.g2p": MagicMock(),
+        "models.tts.maskgct.g2p.g2p_generation": MagicMock(),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -104,10 +183,34 @@ class TestCoMelSingerPipeline:
         assert "t2s_model" not in msg
         assert "codec_encoder" not in msg
 
-    def test_from_pretrained_raises(self) -> None:
-        """from_pretrained raises NotImplementedError until M0 is complete."""
-        with pytest.raises(NotImplementedError, match="pretrained model downloads"):
-            CoMelSingerInferencePipeline.from_pretrained("dummy_config.yaml")
+    def test_from_pretrained_loads_all_models(self) -> None:
+        """from_pretrained correctly calls loaders and returns a pipeline."""
+        m = _make_from_pretrained_mocks()
+
+        with (
+            patch.dict("sys.modules", _sys_modules_dict(m)),
+            patch("utils.util.load_config", m["load_config"]),
+            patch.object(safetensors, "safe_open", m["safe_open"]),
+            patch.object(safetensors.torch, "load_model", m["load_model"]),
+            patch("torch.load", m["torch_load"]),
+            patch("models.tts.maskgct.maskgct_t2s.MaskGCT_T2S", m["t2s_cls"]),
+            patch("models.tts.comelsinger.comelsinger_s2a.CoMelSinger_S2A", m["s2a_cls"]),
+            patch("transformers.Wav2Vec2BertModel", m["w2v_bert_cls"]),
+            tempfile.TemporaryDirectory() as tmpdir,
+        ):
+            ckpt_dir = Path(tmpdir)
+            pipeline = CoMelSingerInferencePipeline.from_pretrained(
+                ckpt_dir, device="cpu"
+            )
+
+        assert isinstance(pipeline, CoMelSingerInferencePipeline)
+        assert pipeline.t2s_model is not None
+        assert pipeline.s2a_model_1layer is not None
+        assert pipeline.s2a_model_full is not None
+        m["load_config"].assert_called_once()
+        m["build_acoustic"].assert_called_once()
+        m["build_semantic"].assert_called_once()
+        m["w2v_bert_cls"].from_pretrained.assert_called_once_with("facebook/w2v-bert-2.0")
 
 
 # ---------------------------------------------------------------------------
@@ -365,3 +468,258 @@ class TestRunInferenceFn:
 
         assert metadata["n_skip"] == 1
         assert "error" in metadata["samples"][0]
+
+
+# ---------------------------------------------------------------------------
+# TestFromPretrained
+# ---------------------------------------------------------------------------
+
+
+class TestFromPretrained:
+    """Tests for from_pretrained via subprocess to avoid module state pollution."""
+
+    def test_correct_checkpoint_paths_used(self) -> None:
+        """from_pretrained passes correct paths for each model component."""
+        # Run in subprocess to avoid sys.modules contamination between tests
+        script = '''
+import sys, tempfile
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+import torch
+
+# Build mock for maskgct_utils
+mock_utils = MagicMock()
+mock_utils.build_acoustic_codec.return_value = (MagicMock(), MagicMock())
+mock_utils.build_semantic_codec.return_value = MagicMock()
+
+mock_load_config = MagicMock(return_value=MagicMock())
+
+mock_ctx = MagicMock()
+mock_ctx.__enter__ = MagicMock(return_value=mock_ctx)
+mock_ctx.__exit__ = MagicMock(return_value=False)
+mock_ctx.keys.return_value = []
+mock_safe_open = MagicMock(return_value=mock_ctx)
+mock_load_model = MagicMock()
+mock_torch_load = MagicMock(return_value={
+    "mean": torch.zeros(1024), "var": torch.ones(1024),
+})
+mock_t2s = MagicMock(return_value=MagicMock())
+mock_s2a = MagicMock(return_value=MagicMock())
+mock_w2v = MagicMock()
+mock_w2v.from_pretrained.return_value = MagicMock()
+
+import safetensors, safetensors.torch
+with (
+    patch.dict("sys.modules", {
+        "models.tts.maskgct.maskgct_utils": mock_utils,
+        "models.tts.maskgct.g2p": MagicMock(),
+        "models.tts.maskgct.g2p.g2p_generation": MagicMock(),
+    }),
+    patch("utils.util.load_config", mock_load_config),
+    patch.object(safetensors, "safe_open", mock_safe_open),
+    patch.object(safetensors.torch, "load_model", mock_load_model),
+    patch("torch.load", mock_torch_load),
+    patch("models.tts.maskgct.maskgct_t2s.MaskGCT_T2S", mock_t2s),
+    patch("models.tts.comelsinger.comelsinger_s2a.CoMelSinger_S2A", mock_s2a),
+    patch("transformers.Wav2Vec2BertModel", mock_w2v),
+    tempfile.TemporaryDirectory() as tmpdir,
+):
+    from models.tts.comelsinger.comelsinger_inference import CoMelSingerInferencePipeline
+    ckpt_dir = Path(tmpdir)
+    pipeline = CoMelSingerInferencePipeline.from_pretrained(ckpt_dir, device="cpu")
+
+assert isinstance(pipeline, CoMelSingerInferencePipeline)
+assert pipeline.t2s_model is not None
+assert pipeline.s2a_model_1layer is not None
+
+cfg_arg = mock_load_config.call_args[0][0]
+assert cfg_arg.endswith("config/maskgct.json"), f"config path: {cfg_arg}"
+
+stats_arg = mock_torch_load.call_args[0][0]
+assert stats_arg.endswith("wav2vec2bert_stats.pt"), f"stats path: {stats_arg}"
+
+assert mock_safe_open.call_count == 4, f"safe_open called {mock_safe_open.call_count} times"
+
+print("PASS")
+'''
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True,
+            cwd=str(Path(__file__).resolve().parents[4]),
+        )
+        assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        assert "PASS" in result.stdout
+
+    def test_lora_loaded_when_path_given(self) -> None:
+        """from_pretrained calls load_lora_weights when lora_path is provided."""
+        script = '''
+import sys, tempfile
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+import torch
+
+mock_utils = MagicMock()
+mock_utils.build_acoustic_codec.return_value = (MagicMock(), MagicMock())
+mock_utils.build_semantic_codec.return_value = MagicMock()
+
+mock_ctx = MagicMock()
+mock_ctx.__enter__ = MagicMock(return_value=mock_ctx)
+mock_ctx.__exit__ = MagicMock(return_value=False)
+mock_ctx.keys.return_value = []
+
+import safetensors, safetensors.torch
+with (
+    patch.dict("sys.modules", {
+        "models.tts.maskgct.maskgct_utils": mock_utils,
+        "models.tts.maskgct.g2p": MagicMock(),
+        "models.tts.maskgct.g2p.g2p_generation": MagicMock(),
+    }),
+    patch("utils.util.load_config", MagicMock(return_value=MagicMock())),
+    patch.object(safetensors, "safe_open", MagicMock(return_value=mock_ctx)),
+    patch.object(safetensors.torch, "load_model", MagicMock()),
+    patch("torch.load", MagicMock(return_value={
+        "mean": torch.zeros(1024), "var": torch.ones(1024),
+    })),
+    patch("models.tts.maskgct.maskgct_t2s.MaskGCT_T2S", MagicMock(return_value=MagicMock())),
+    patch("models.tts.comelsinger.comelsinger_s2a.CoMelSinger_S2A", MagicMock(return_value=MagicMock())),
+    patch("transformers.Wav2Vec2BertModel", MagicMock(**{"from_pretrained.return_value": MagicMock()})),
+):
+    from models.tts.comelsinger.comelsinger_inference import CoMelSingerInferencePipeline
+    with patch.object(CoMelSingerInferencePipeline, "load_lora_weights") as mock_lora:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = CoMelSingerInferencePipeline.from_pretrained(
+                Path(tmpdir), lora_path="/fake/lora", device="cpu"
+            )
+        mock_lora.assert_called_once_with(Path("/fake/lora"))
+
+print("PASS")
+'''
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True,
+            cwd=str(Path(__file__).resolve().parents[4]),
+        )
+        assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        assert "PASS" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# TestLoadModels
+# ---------------------------------------------------------------------------
+
+
+class TestLoadModels:
+    """Tests for run_preprocess.load_models via subprocess."""
+
+    def test_returns_dict_with_required_keys(self) -> None:
+        """load_models returns a dict with all required keys."""
+        script = '''
+import sys, types
+from unittest.mock import MagicMock, patch
+import torch
+
+mock_utils = MagicMock()
+mock_utils.build_acoustic_codec.return_value = (MagicMock(), MagicMock())
+mock_utils.build_semantic_codec.return_value = MagicMock()
+
+mock_ctx = MagicMock()
+mock_ctx.__enter__ = MagicMock(return_value=mock_ctx)
+mock_ctx.__exit__ = MagicMock(return_value=False)
+mock_ctx.keys.return_value = []
+
+mock_w2v = MagicMock()
+mock_w2v.from_pretrained.return_value = MagicMock()
+
+# Create a mock transformers module with Wav2Vec2BertModel
+mock_transformers = types.ModuleType("transformers")
+mock_transformers.Wav2Vec2BertModel = mock_w2v
+
+import safetensors, safetensors.torch
+with (
+    patch.dict("sys.modules", {
+        "models.tts.maskgct.maskgct_utils": mock_utils,
+        "models.tts.maskgct.g2p": MagicMock(),
+        "models.tts.maskgct.g2p.g2p_generation": MagicMock(),
+        "transformers": mock_transformers,
+    }),
+    patch("utils.util.load_config", MagicMock(return_value=MagicMock())),
+    patch.object(safetensors, "safe_open", MagicMock(return_value=mock_ctx)),
+    patch.object(safetensors.torch, "load_model", MagicMock()),
+    patch("torch.load", MagicMock(return_value={
+        "mean": torch.zeros(1024), "var": torch.ones(1024),
+    })),
+):
+    from models.tts.comelsinger.run_preprocess import load_models
+    result = load_models(torch.device("cpu"))
+
+expected = {"codec_encoder", "codec_decoder", "w2v_bert_model",
+            "semantic_codec", "semantic_mean", "semantic_std", "pitch_tokenizer"}
+assert isinstance(result, dict)
+assert set(result.keys()) == expected, f"keys: {set(result.keys())}"
+
+print("PASS")
+'''
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True,
+            cwd=str(Path(__file__).resolve().parents[4]),
+        )
+        assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        assert "PASS" in result.stdout
+
+    def test_semantic_std_is_sqrt_of_var(self) -> None:
+        """semantic_std should be sqrt(var), not raw var."""
+        script = '''
+import sys, types
+from unittest.mock import MagicMock, patch
+import torch
+
+mock_utils = MagicMock()
+mock_utils.build_acoustic_codec.return_value = (MagicMock(), MagicMock())
+mock_utils.build_semantic_codec.return_value = MagicMock()
+
+mock_ctx = MagicMock()
+mock_ctx.__enter__ = MagicMock(return_value=mock_ctx)
+mock_ctx.__exit__ = MagicMock(return_value=False)
+mock_ctx.keys.return_value = []
+
+mock_w2v = MagicMock()
+mock_w2v.from_pretrained.return_value = MagicMock()
+
+test_var = torch.full((1024,), 4.0)
+
+mock_transformers = types.ModuleType("transformers")
+mock_transformers.Wav2Vec2BertModel = mock_w2v
+
+import safetensors, safetensors.torch
+with (
+    patch.dict("sys.modules", {
+        "models.tts.maskgct.maskgct_utils": mock_utils,
+        "models.tts.maskgct.g2p": MagicMock(),
+        "models.tts.maskgct.g2p.g2p_generation": MagicMock(),
+        "transformers": mock_transformers,
+    }),
+    patch("utils.util.load_config", MagicMock(return_value=MagicMock())),
+    patch.object(safetensors, "safe_open", MagicMock(return_value=mock_ctx)),
+    patch.object(safetensors.torch, "load_model", MagicMock()),
+    patch("torch.load", MagicMock(return_value={
+        "mean": torch.zeros(1024), "var": test_var,
+    })),
+):
+    from models.tts.comelsinger.run_preprocess import load_models
+    result = load_models(torch.device("cpu"))
+
+expected_std = torch.full((1024,), 2.0)
+assert torch.allclose(result["semantic_std"], expected_std), (
+    f"Expected std=2.0, got {result['semantic_std'][:5]}"
+)
+
+print("PASS")
+'''
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True,
+            cwd=str(Path(__file__).resolve().parents[4]),
+        )
+        assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        assert "PASS" in result.stdout
